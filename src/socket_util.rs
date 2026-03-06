@@ -82,6 +82,7 @@ pub fn new_socket2_udp_socket_with_buffer_size(
 
 fn into_tokio_udp_socket(socket: socket2::Socket) -> std::io::Result<tokio::net::UdpSocket> {
     let raw_fd = socket.into_raw_fd();
+    crate::tun::protect_socket(raw_fd)?;
     let std_udp_socket = unsafe { std::net::UdpSocket::from_raw_fd(raw_fd) };
     tokio::net::UdpSocket::from_std(std_udp_socket)
 }
@@ -95,6 +96,8 @@ pub fn new_tcp_socket(
     } else {
         tokio::net::TcpSocket::new_v4()?
     };
+
+    crate::tun::protect_socket(tcp_socket.as_raw_fd())?;
 
     if let Some(_b) = bind_interface {
         #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
