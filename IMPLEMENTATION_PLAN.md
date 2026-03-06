@@ -1,9 +1,12 @@
-# floppa-vless: VLESS+REALITY Client Library — Implementation Plan
+# floppa-vless: VLESS+REALITY Shared Library — Implementation Plan
 
 ## Overview
 
-Strip cfal/shoes fork down to a minimal VLESS+REALITY+Vision+TUN library (`floppa-vless`),
-then integrate into floppa-vpn as a second protocol alongside WireGuard.
+Strip cfal/shoes fork to a VLESS+REALITY library (`floppa-vless`) with both **client**
+(TUN tunnel + Vision) and **server** (REALITY+VLESS inbound) paths. Used by:
+
+- **floppa-client** (Tauri 2) — client-side VPN tunnel via TUN device
+- **floppa-daemon** — server-side VLESS+REALITY inbound (replacing/alongside WireGuard)
 
 ## Architecture
 
@@ -13,15 +16,24 @@ floppa-client (Tauri 2)
 │   ├── WireGuard path:  ProtocolConfig::WireGuard → GotatunTunnel (existing)
 │   └── VLESS path:      ProtocolConfig::VlessReality → VlessTunnel (new)
 │
-└── VlessTunnel (thin wrapper in floppa-client or bridge crate)
+└── VlessTunnel (thin wrapper in floppa-client)
         │
         ▼
     floppa-vless (separate repo, git dependency)
-    ├── reality/   — REALITY client handshake (X25519 + HKDF + AES-256-GCM)
-    ├── vless/     — VLESS framing + Vision flow control
-    ├── tun/       — TUN device + smoltcp TCP/IP stack
-    ├── crypto/    — rustls wrappers
-    └── core I/O   — AsyncStream, copy_bidirectional, address types
+    ├── api.rs         — Public client API: VlessTunnel, VlessConfig, URI parser
+    ├── reality/       — REALITY client + server (X25519 + HKDF + AES-256-GCM)
+    ├── vless/         — VLESS framing + Vision flow control (client + server)
+    ├── tun/           — TUN device + smoltcp TCP/IP stack (client only)
+    ├── tcp/           — TCP server loop + handler factory (server only)
+    ├── crypto/        — rustls wrappers
+    ├── config/        — YAML config for standalone server mode
+    └── core I/O       — AsyncStream, copy_bidirectional, address types
+
+floppa-daemon
+└── Uses floppa-vless server handlers:
+    ├── RealityServerConnection — REALITY TLS inbound
+    ├── VlessServerHandler      — VLESS protocol parsing
+    └── TlsServerHandler        — TLS termination + SNI routing
 ```
 
 ## Design Principles
@@ -36,14 +48,16 @@ floppa-client (Tauri 2)
 - **Don't add cover traffic or artificial jitter.** Adding traffic that real browsers don't
   generate makes you MORE fingerprintable, not less. Vision padding is sufficient.
 - **Support standard VLESS URI format** for config import from 3X-UI panels.
+- **Server code stays.** The REALITY/VLESS server handlers are kept for use in
+  floppa-daemon. This library serves both sides.
 
 ---
 
-## Phase 0: Strip shoes (1-2 days)
+## Phase 0: Strip non-VLESS protocols ✅ DONE
 
-**Goal:** Delete everything except VLESS+REALITY client path + TUN.
+**Goal:** Delete everything except VLESS+REALITY (client + server) + TUN.
 
-### Remove (~51K lines)
+### Removed
 
 | Category | Files |
 |----------|-------|
@@ -57,83 +71,52 @@ floppa-client (Tauri 2)
 | AnyTLS | `anytls/` |
 | ShadowTLS | `shadow_tls/` |
 | HTTP/SOCKS5 inbound | `http_handler.rs`, `socks_handler.rs`, `socks5_udp_relay.rs`, `mixed_handler.rs` |
-| Server-side handlers | `tls_server_handler.rs`, `reality/reality_server_connection.rs`, all `*_server_handler` |
 | XUDP | `xudp/` |
 | H2MUX | `h2mux/` |
 | WebSocket | `websocket/` |
 | UoT | `uot/` |
 | Port forward | `port_forward_handler.rs` |
-| Server TCP handler factory | `tcp/tcp_server_handler_factory.rs` |
-| YAML config engine | Most of `config/` (replace with typed API) |
-| Heavy DNS features | DNS server, DoH server (keep client resolver only) |
 | FFI (shoes-style) | `ffi/` (floppa has its own Tauri + JNI integration) |
 
-### Keep (~16K lines)
+### Kept
 
-| Module | Files | Purpose |
-|--------|-------|---------|
-| VLESS framing | `vless/vless_message_stream.rs`, `vless/vless_client_handler.rs` | Protocol codec |
-| Vision flow | `vless/vision_stream.rs`, `vision_pad.rs`, `vision_unpad.rs`, `tls_deframer.rs`, `tls_fuzzy_deframer.rs` | TLS-in-TLS optimization |
-| REALITY client | `reality/reality_client_connection.rs`, `reality_tls13_messages.rs`, `reality_tls13_keys.rs`, `reality_cipher_suite.rs`, `reality_auth.rs`, `reality_records.rs`, `reality_aead.rs`, `reality_util.rs`, `common.rs` | Custom TLS 1.3 handshake |
-| TUN + smoltcp | `tun/tun_server.rs`, `tcp_stack_direct.rs`, `tcp_conn.rs`, `udp_manager.rs`, `udp_handler.rs`, `platform.rs` | VPN packet handling |
-| Core I/O | `async_stream.rs`, `copy_bidirectional.rs`, `stream_reader.rs`, `address.rs`, `socket_util.rs`, `util.rs`, `slide_buffer.rs` | Shared utilities |
-| Crypto/TLS | `crypto/` (rustls wrappers) | Standard TLS for non-REALITY |
-| DNS resolver | `resolver.rs`, minimal `dns/` subset | Name resolution |
-| Client chain | `client_proxy_chain.rs` (simplified) | Single-chain VLESS connector |
+| Module | Purpose | Used by |
+|--------|---------|---------|
+| VLESS framing | `vless/vless_message_stream.rs`, `vless_client_handler.rs` | Client |
+| VLESS server | `vless/vless_server_handler.rs` | Daemon |
+| Vision flow | `vless/vision_stream.rs`, `vision_pad.rs`, `vision_unpad.rs`, `tls_deframer.rs`, `tls_fuzzy_deframer.rs` | Client |
+| REALITY client | `reality/reality_client_connection.rs`, `reality_tls13_messages.rs`, `reality_tls13_keys.rs`, etc. | Client |
+| REALITY server | `reality/reality_server_connection.rs`, `reality_server_handler.rs` | Daemon |
+| TLS server | `tls_server_handler.rs` | Daemon |
+| TCP server | `tcp/tcp_server.rs`, `tcp_server_handler_factory.rs` | Daemon |
+| TUN + smoltcp | `tun/tun_server.rs`, `tcp_stack_direct.rs`, `tcp_conn.rs`, `udp_manager.rs`, etc. | Client |
+| Core I/O | `async_stream.rs`, `copy_bidirectional.rs`, `address.rs`, etc. | Both |
+| Crypto/TLS | `crypto/` (rustls wrappers) | Both |
+| DNS resolver | `resolver.rs`, `dns/` | Both |
+| Client chain | `client_proxy_chain.rs` | Client |
+| Config engine | `config/` (YAML parsing) | Standalone server mode |
 
-### Strip Cargo.toml dependencies
+### Cleanup backlog (non-blocking)
 
-Remove: `quinn`, `h2`, `h3`, `hickory-dns` (server features), `jni`, `ndk-sys`,
-`android_logger`, `parking_lot`, heavy optional deps.
+These are nice-to-have cleanups, not required for integration:
 
-Keep: `tokio`, `rustls`, `aws-lc-rs`, `x25519-dalek`, `smoltcp`, `tun`, `log`, `serde`,
-`uuid`, `base64`.
+- Remove unused deps from Cargo.toml (`quinn`, `parking_lot`, `serde_yaml` if config
+  engine is dropped)
+- Slim down `ClientProxySelector` (2K lines) if only single-chain is needed for client
 
-### Checklist
+### Status
 
-- [ ] `cargo build` succeeds with only VLESS+REALITY+TUN code
-- [ ] `cargo test` passes for all kept modules (~35 files with inline tests)
-- [ ] No references to removed protocols remain
+- [x] `cargo build` succeeds
+- [x] `cargo test` passes (480 tests)
+- [x] Non-VLESS protocols removed
 
 ---
 
-## Phase 1: Public API + Stats (2-3 days)
+## Phase 1: Public Client API + Stats ✅ DONE
 
 **Goal:** Expose a clean `VlessTunnel` API that matches floppa's `TunnelManager` pattern.
 
-### Replace ClientProxySelector
-
-Shoes' `ClientProxySelector` is 2K lines of rule-matching engine. Replace with a trivial
-single-chain selector (~50 lines) that always routes through one VLESS+REALITY chain:
-
-```rust
-pub struct SingleChainSelector {
-    chain: Arc<ClientProxyChain>,
-}
-
-impl SingleChainSelector {
-    pub fn new(config: &VlessConfig) -> Result<Self, Error> {
-        // Build one chain: socket → REALITY TLS → VLESS+Vision → target
-    }
-}
-```
-
-### Add stats tracking
-
-Shoes' `run_tun_server` has no stats API. Add shared atomic counters:
-
-```rust
-pub struct TunnelStats {
-    pub tx_bytes: AtomicU64,
-    pub rx_bytes: AtomicU64,
-    pub connected_at: Instant,
-}
-```
-
-Thread these through `handle_tcp_connection` and `handle_udp_packets` — increment on
-every `copy_bidirectional` completion. ~100 lines.
-
-### VlessTunnel public API
+### VlessTunnel public API (in `api.rs`)
 
 ```rust
 pub struct VlessTunnel { /* shutdown_tx, task handle, stats */ }
@@ -143,8 +126,6 @@ impl VlessTunnel {
     pub async fn new(
         config: &VlessConfig,
         interface_name: &str,
-        fwmark: Option<u32>,
-        endpoint: SocketAddr,
     ) -> Result<Self, String>;
 
     /// Android/iOS: takes fd from platform VPN service
@@ -164,11 +145,6 @@ impl VlessTunnel {
 }
 ```
 
-### Bridge socket protection
-
-Forward floppa's `SOCKET_PROTECT_CALLBACK` to shoes' `set_global_socket_protector()`.
-~30 lines.
-
 ### VlessConfig struct
 
 ```rust
@@ -179,16 +155,17 @@ pub struct VlessConfig {
     pub reality_public_key: String,
     pub reality_short_id: String,
     pub flow: Option<String>,      // "xtls-rprx-vision"
-    pub address: String,           // client tunnel IP, e.g. "10.0.0.2/32"
+    pub address: Option<String>,   // client tunnel IP
+    pub netmask: Option<String>,   // e.g. "255.255.255.0"
     pub dns: Option<String>,
     pub mtu: Option<u16>,
-    pub allowed_ips: String,
+    pub allowed_ips: Option<String>,
 }
 ```
 
 ### VLESS URI parser
 
-Parse standard format from 3X-UI / v2rayNG:
+Parses standard format from 3X-UI / v2rayNG:
 
 ```
 vless://UUID@SERVER:443?encryption=none&flow=xtls-rprx-vision
@@ -196,15 +173,24 @@ vless://UUID@SERVER:443?encryption=none&flow=xtls-rprx-vision
   &pbk=PUBLIC_KEY&sid=SHORT_ID&type=tcp#profile-name
 ```
 
-~100 lines.
+### Stats tracking
 
-### Checklist
+`TunnelStats` with `AtomicU64` counters for tx/rx bytes, threaded through
+`handle_tcp_connection` and `handle_udp_packets` in the TUN server.
 
-- [ ] `VlessTunnel::new()` creates tunnel and returns handle
-- [ ] `get_stats()` returns live tx/rx byte counts
-- [ ] `stop()` shuts down cleanly
-- [ ] VLESS URI parsing works for standard format
-- [ ] Socket protection callback is bridged
+### Socket protection bridge
+
+`set_socket_protector()` forwards floppa's callback to shoes' `tun::platform` module.
+
+### Status
+
+- [x] `VlessTunnel::new()` creates tunnel and returns handle
+- [x] `VlessTunnel::from_fd()` for Android/iOS
+- [x] `get_stats()` returns live tx/rx byte counts
+- [x] `stop()` shuts down cleanly
+- [x] VLESS URI parsing works (8 unit tests)
+- [x] Socket protection callback bridged
+- [x] `lib.rs` exports `pub mod api` + `pub mod tun`
 
 ---
 
@@ -214,7 +200,7 @@ vless://UUID@SERVER:443?encryption=none&flow=xtls-rprx-vision
 
 ### floppa-client changes
 
-**state.rs** — Add variant + config struct:
+**state.rs** — Add variant:
 ```rust
 pub enum ProtocolConfig {
     #[serde(rename = "wireguard")]
@@ -227,7 +213,7 @@ pub enum ProtocolConfig {
 Implement `endpoint_str()`, `address()`, `dns_servers()`, `allowed_ips_networks()`,
 `get_mtu()`, `protocol_name()` for the new variant.
 
-Add `VlessConfig::from_uri(uri: &str)` parser (or delegate to floppa-vless).
+Add `VlessConfig::from_uri(uri: &str)` parser (delegate to floppa-vless).
 
 **tunnel.rs** — Add `VlessTunnelWrapper` alongside `GotatunTunnel` with same interface:
 `new()`, `from_fd()`, `get_stats()`, `stop()`.
@@ -248,14 +234,15 @@ Socket protection callback bridges to floppa-vless.
 
 **Platform routes/DNS** — Protocol-agnostic. No changes needed.
 
-### Server-side (floppa-server)
+### Server-side (floppa-daemon)
 
-Add `generate_vless_config()` in `floppa-core/src/services.rs`:
-- Allocate UUID per peer
-- Return VLESS URI string
-- Store in DB alongside WireGuard config
+Add VLESS+REALITY server alongside WireGuard in floppa-daemon:
 
-API: extend `POST /me/peers` with protocol parameter.
+- Use floppa-vless server handlers (`TlsServerHandler`, `RealityServerConnection`,
+  `VlessServerHandler`) to accept VLESS+REALITY inbound connections
+- Allocate UUID per peer, store in DB alongside WireGuard keys
+- Extend `POST /me/peers` API with protocol parameter
+- Generate VLESS URI strings for client config distribution
 
 ### Checklist
 
@@ -362,20 +349,25 @@ protocol compatibility — only the observable TLS outer layer changes.
 floppa-vless/
 ├── Cargo.toml
 ├── src/
-│   ├── lib.rs              # Public API: VlessTunnel, VlessConfig, TrafficStats
-│   ├── vless/              # VLESS framing + Vision (from shoes)
-│   ├── reality/            # REALITY client (from shoes)
-│   ├── tun/                # TUN + smoltcp (from shoes)
-│   ├── crypto/             # rustls wrappers (from shoes)
-│   ├── address.rs          # Address types (from shoes)
-│   ├── async_stream.rs     # I/O traits (from shoes)
+│   ├── lib.rs              # Public API exports
+│   ├── api.rs              # VlessTunnel, VlessConfig, TrafficStats, URI parser
+│   ├── vless/              # VLESS framing + Vision (client + server)
+│   ├── reality/            # REALITY handshake (client + server)
+│   ├── tun/                # TUN + smoltcp (client only)
+│   ├── tcp/                # TCP server loop (server only)
+│   ├── tls_server_handler.rs  # TLS inbound (server only)
+│   ├── crypto/             # rustls wrappers
+│   ├── config/             # YAML config (standalone server mode)
+│   ├── address.rs          # Address types
+│   ├── async_stream.rs     # I/O traits
 │   ├── copy_bidirectional.rs
 │   ├── stream_reader.rs
 │   ├── slide_buffer.rs
 │   ├── socket_util.rs
 │   ├── resolver.rs
-│   ├── client_proxy_chain.rs  # Simplified single-chain
+│   ├── client_proxy_chain.rs
 │   └── util.rs
+├── src/main.rs             # Standalone server binary
 └── tests/
 ```
 
@@ -401,6 +393,7 @@ floppa-vless = { git = "https://github.com/okhsunrog/floppa-vless" }
 | uuid | VLESS user ID |
 | base64 | Key encoding |
 | serde / serde_json | Config serialization |
+| serde_yaml | YAML config for standalone server mode |
 | url | VLESS URI parsing |
 
 ---
@@ -409,17 +402,17 @@ floppa-vless = { git = "https://github.com/okhsunrog/floppa-vless" }
 
 | Phase | Time | Cumulative |
 |-------|------|------------|
-| 0: Strip shoes | 1-2 days | 1-2 days |
-| 1: Public API + stats | 2-3 days | ~1 week |
-| 2: Floppa integration | 2-3 days | ~1.5 weeks |
-| 3: Reconnection | 1 week | ~2.5 weeks |
-| 4: Fingerprint audit | 2-3 days | ~3 weeks |
+| 0: Strip non-VLESS protocols | ✅ Done | — |
+| 1: Public API + stats | ✅ Done | — |
+| 2: Floppa integration | 2-3 days | 2-3 days |
+| 3: Reconnection | 1 week | ~1.5 weeks |
+| 4: Fingerprint audit | 2-3 days | ~2 weeks |
 | 5: Polish | Ongoing | — |
-| **Core working client** | **~3 weeks** | |
+| **Core working client** | **~2 weeks** | |
 
 ## Testing Strategy
 
-- **Unit tests:** Keep all ~35 files of inline tests from shoes (REALITY, Vision, TUN, etc.)
+- **Unit tests:** Keep all inline tests from shoes (480 passing)
 - **Interop:** Test every phase against standard Xray-core server with VLESS+REALITY+Vision
 - **Wireshark:** Capture ClientHello, verify fingerprint after Phase 4
 - **Mobile:** Test Android VpnService flow after Phase 2
