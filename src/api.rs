@@ -457,4 +457,208 @@ mod tests {
             selector.err()
         );
     }
+
+    // -----------------------------------------------------------------------
+    // E2E tests (require Docker infrastructure)
+    // Run: cd tests/docker && ./run-e2e.sh
+    // Or manually: docker compose up -d && cargo test e2e -- --ignored
+    // -----------------------------------------------------------------------
+
+    // Pre-generated test-only keys (no security value)
+    const E2E_SERVER_ADDR: &str = "127.0.0.1:10443";
+    const E2E_SERVER_NAME: &str = "www.example.com";
+    const E2E_PUBLIC_KEY: &str = "nvgtQmmD0yTsjpc-qgF8AGhF_OkKAj44uaaP-f5zFBo";
+    const E2E_SHORT_ID: &str = "abcdef1234567890";
+    // UUID with Vision flow configured in Xray
+    const E2E_UUID_VISION: &str = "a4cbbde8-e6c2-44b6-8ba8-b68b8018f99c";
+    // UUID without Vision flow configured in Xray
+    const E2E_UUID_BASIC: &str = "1a4f9a9e-1561-47ba-a2be-149a85625763";
+    const E2E_ECHO_HOST: &str = "127.0.0.1";
+    const E2E_ECHO_PORT: u16 = 18080;
+
+    fn e2e_config(uuid: &str, flow: Option<&str>) -> VlessConfig {
+        VlessConfig {
+            uuid: uuid.to_string(),
+            server_addr: E2E_SERVER_ADDR.to_string(),
+            server_name: E2E_SERVER_NAME.to_string(),
+            reality_public_key: E2E_PUBLIC_KEY.to_string(),
+            reality_short_id: E2E_SHORT_ID.to_string(),
+            flow: flow.map(|s| s.to_string()),
+            address: None,
+            netmask: None,
+            dns: None,
+            mtu: None,
+            allowed_ips: None,
+        }
+    }
+
+    async fn connect_through_vless(
+        config: &VlessConfig,
+        target_host: &str,
+        target_port: u16,
+    ) -> std::io::Result<Box<dyn crate::async_stream::AsyncStream>> {
+        let resolver: Arc<dyn crate::resolver::Resolver> = Arc::new(NativeResolver::new());
+        let selector = Arc::new(
+            build_vless_selector(config, resolver.clone())
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?,
+        );
+
+        let target =
+            NetLocation::from_str(&format!("{target_host}:{target_port}"), None).map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("Invalid target: {e}"),
+                )
+            })?;
+        let resolved: crate::address::ResolvedLocation = target.into();
+
+        let decision = selector.judge(resolved, &resolver).await?;
+
+        match decision {
+            crate::client_proxy_selector::ConnectDecision::Allow {
+                chain_group,
+                remote_location,
+            } => {
+                let result = chain_group.connect_tcp(remote_location, &resolver).await?;
+                Ok(result.client_stream)
+            }
+            crate::client_proxy_selector::ConnectDecision::Block => Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "Connection blocked by selector",
+            )),
+        }
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires Docker: cd tests/docker && ./run-e2e.sh
+    async fn test_e2e_vless_reality_basic() {
+        let config = e2e_config(E2E_UUID_BASIC, None);
+
+        let mut stream = tokio::time::timeout(
+            Duration::from_secs(30),
+            connect_through_vless(&config, E2E_ECHO_HOST, E2E_ECHO_PORT),
+        )
+        .await
+        .expect("Connection timed out")
+        .expect("Failed to connect through VLESS+REALITY");
+
+        // Send data and verify echo
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let test_data = b"Hello from shoes e2e test!";
+        stream.write_all(test_data).await.unwrap();
+        stream.flush().await.unwrap();
+
+        let mut buf = vec![0u8; test_data.len()];
+        stream.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, test_data);
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_e2e_vless_reality_vision() {
+        let config = e2e_config(E2E_UUID_VISION, Some("xtls-rprx-vision"));
+
+        let mut stream = tokio::time::timeout(
+            Duration::from_secs(30),
+            connect_through_vless(&config, E2E_ECHO_HOST, E2E_ECHO_PORT),
+        )
+        .await
+        .expect("Connection timed out")
+        .expect("Failed to connect through VLESS+REALITY+Vision");
+
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let test_data = b"Hello from Vision e2e test!";
+        stream.write_all(test_data).await.unwrap();
+        stream.flush().await.unwrap();
+
+        let mut buf = vec![0u8; test_data.len()];
+        stream.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, test_data);
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_e2e_vless_reality_large_payload() {
+        let config = e2e_config(E2E_UUID_BASIC, None);
+
+        let mut stream = tokio::time::timeout(
+            Duration::from_secs(30),
+            connect_through_vless(&config, E2E_ECHO_HOST, E2E_ECHO_PORT),
+        )
+        .await
+        .expect("Connection timed out")
+        .expect("Failed to connect");
+
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        // Send 1MB of data
+        let test_data: Vec<u8> = (0..1_000_000).map(|i| (i % 256) as u8).collect();
+        stream.write_all(&test_data).await.unwrap();
+        stream.flush().await.unwrap();
+
+        let mut buf = vec![0u8; test_data.len()];
+        stream.read_exact(&mut buf).await.unwrap();
+        assert_eq!(buf, test_data);
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_e2e_vless_reality_multiple_exchanges() {
+        let config = e2e_config(E2E_UUID_BASIC, None);
+
+        let mut stream = tokio::time::timeout(
+            Duration::from_secs(30),
+            connect_through_vless(&config, E2E_ECHO_HOST, E2E_ECHO_PORT),
+        )
+        .await
+        .expect("Connection timed out")
+        .expect("Failed to connect");
+
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        for i in 0..10 {
+            let msg = format!("Message {i} from shoes e2e test");
+            stream.write_all(msg.as_bytes()).await.unwrap();
+            stream.flush().await.unwrap();
+
+            let mut buf = vec![0u8; msg.len()];
+            stream.read_exact(&mut buf).await.unwrap();
+            assert_eq!(String::from_utf8(buf).unwrap(), msg);
+        }
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_e2e_vless_reality_wrong_uuid() {
+        let config = e2e_config("00000000-0000-4000-8000-000000000000", None);
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(15),
+            connect_through_vless(&config, E2E_ECHO_HOST, E2E_ECHO_PORT),
+        )
+        .await
+        .expect("Timed out");
+
+        // Connection with wrong UUID should fail (Xray rejects it)
+        // It may fail at connect or when trying to use the stream
+        if let Ok(mut stream) = result {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let test_data = b"this should not echo back";
+            let _ = stream.write_all(test_data).await;
+            let _ = stream.flush().await;
+
+            let mut buf = vec![0u8; test_data.len()];
+            let read_result =
+                tokio::time::timeout(Duration::from_secs(5), stream.read_exact(&mut buf)).await;
+
+            // Should either timeout or get an error — not get valid echo
+            match read_result {
+                Ok(Ok(_)) => {
+                    assert_ne!(&buf, test_data, "Wrong UUID should not produce valid echo");
+                }
+                _ => {} // Expected: error or timeout
+            }
+        }
+        // If connect itself failed, that's also correct behavior
+    }
 }

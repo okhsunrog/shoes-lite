@@ -77,19 +77,28 @@ pub const OUTGOING_BUFFER_LIMIT: usize = 64 * 1024;
 
 /// Strip TLS 1.3 content type trailer from decrypted plaintext slice.
 ///
-/// TLS 1.3 format: content || type_byte
+/// TLS 1.3 format per RFC 8446 Section 5.4: content || type_byte || zeros*
 /// Returns (content_type, valid_content_length) without modifying the slice.
 ///
 /// This is the zero-allocation version for use with in-place decryption.
-/// NOTE: Does NOT strip padding zeros - our implementation doesn't add padding.
+/// Handles optional zero padding (used by Xray-core and other implementations).
 #[inline]
 pub fn strip_content_type_slice(plaintext: &[u8]) -> io::Result<(u8, usize)> {
     if plaintext.is_empty() {
         return Err(Error::new(ErrorKind::InvalidData, "Empty plaintext"));
     }
 
-    // No padding in our implementation
-    let content_type = plaintext[plaintext.len() - 1];
+    // Skip trailing zero padding (RFC 8446 Section 5.4)
+    let mut end = plaintext.len();
+    while end > 0 && plaintext[end - 1] == 0 {
+        end -= 1;
+    }
+
+    if end == 0 {
+        return Err(Error::new(ErrorKind::InvalidData, "Plaintext is all zeros"));
+    }
+
+    let content_type = plaintext[end - 1];
 
     if content_type != CONTENT_TYPE_HANDSHAKE
         && content_type != CONTENT_TYPE_APPLICATION_DATA
@@ -101,7 +110,7 @@ pub fn strip_content_type_slice(plaintext: &[u8]) -> io::Result<(u8, usize)> {
         ));
     }
 
-    Ok((content_type, plaintext.len() - 1))
+    Ok((content_type, end - 1))
 }
 
 /// Strip TLS 1.3 content type trailer from decrypted plaintext.

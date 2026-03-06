@@ -1,0 +1,38 @@
+{
+  "log": {
+    "loglevel": "warning"
+  },
+  "inbounds": [
+    {
+      "port": 10443,
+      "protocol": "vless",
+      "settings": {
+        "clients": [
+          {
+            "id": "a4cbbde8-e6c2-44b6-8ba8-b68b8018f99c",
+            "flow": "xtls-rprx-vision"
+          },
+          {
+            "id": "1a4f9a9e-1561-47ba-a2be-149a85625763"
+          }
+        ],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "reality",
+        "realitySettings": {
+          "dest": "127.0.0.1:19443",
+          "serverNames": ["www.example.com"],
+          "privateKey": "UNvGo7qsEFJPx_6IaglS7sdv-2bOLCQJnHVfUWHvYY4",
+          "shortIds": ["abcdef1234567890"]
+        }
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "protocol": "freedom"
+    }
+  ]
+}
