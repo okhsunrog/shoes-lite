@@ -1,3 +1,6 @@
+// Binary re-declares lib modules; items used only by library consumers appear unused here
+#![allow(dead_code)]
+
 mod address;
 mod api;
 mod async_stream;

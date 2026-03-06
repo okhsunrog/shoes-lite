@@ -44,7 +44,7 @@ impl RoutingCacheKey {
 
 /// Cached routing decision.
 #[derive(Debug, Clone, Copy)]
-pub(crate) enum CachedDecision {
+pub enum CachedDecision {
     /// Index into the rules Vec for an Allow decision
     Allow(usize),
     /// Block decision

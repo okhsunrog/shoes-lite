@@ -62,17 +62,6 @@ impl<T> NoneOrSome<T> {
         }
     }
 
-    pub fn into_iter(self) -> Box<dyn Iterator<Item = T> + Send>
-    where
-        T: Send + 'static,
-    {
-        match self {
-            NoneOrSome::Unspecified | NoneOrSome::None => Box::new(std::iter::empty()),
-            NoneOrSome::One(item) => Box::new(SingleItemIter(Some(item))),
-            NoneOrSome::Some(v) => Box::new(v.into_iter()),
-        }
-    }
-
     pub fn iter<'a>(&'a self) -> Box<dyn Iterator<Item = &'a T> + Send + 'a>
     where
         T: Sync,
@@ -138,6 +127,19 @@ impl<T> NoneOrSome<T> {
                     NoneOrSome::Some(filtered)
                 }
             }
+        }
+    }
+}
+
+impl<T: Send + 'static> IntoIterator for NoneOrSome<T> {
+    type Item = T;
+    type IntoIter = Box<dyn Iterator<Item = T> + Send>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        match self {
+            NoneOrSome::Unspecified | NoneOrSome::None => Box::new(std::iter::empty()),
+            NoneOrSome::One(item) => Box::new(SingleItemIter(Some(item))),
+            NoneOrSome::Some(v) => Box::new(v.into_iter()),
         }
     }
 }

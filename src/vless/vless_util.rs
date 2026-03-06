@@ -9,7 +9,6 @@ use crate::stream_reader::StreamReader;
 // VLESS protocol command types
 pub const COMMAND_TCP: u8 = 1;
 pub const COMMAND_UDP: u8 = 2;
-pub const COMMAND_MUX: u8 = 3; // Also known as XUDP - multiplexes UDP over single TCP connection
 
 pub const XTLS_VISION_FLOW: &str = "xtls-rprx-vision";
 

@@ -280,7 +280,7 @@ impl NetLocationPortRange {
         Ok(Self { address, ports })
     }
 
-    pub fn from_str(s: &str) -> std::io::Result<Self> {
+    pub fn parse(s: &str) -> std::io::Result<Self> {
         // Split address and port specification
         let (address_str, port_str) = match s.rfind(':') {
             Some(i) => (&s[0..i], &s[i + 1..]),

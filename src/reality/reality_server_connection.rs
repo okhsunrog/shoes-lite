@@ -535,7 +535,7 @@ impl RealityServerConnection {
         let mut tls_shared_secret = [0u8; 32];
         agreement::agree(
             &our_private_key,
-            &peer_public_key,
+            peer_public_key,
             io::Error::other("ECDH failed"),
             |key_material| {
                 tls_shared_secret.copy_from_slice(key_material);

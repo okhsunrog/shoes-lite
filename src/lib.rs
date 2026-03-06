@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 //! shoes-lite - VLESS+REALITY client/server library.
 //!
 //! Stripped from cfal/shoes to provide VLESS+REALITY support

@@ -73,111 +73,6 @@ impl SocketProtector for NoOpSocketProtector {
     }
 }
 
-/// A socket protector that calls a closure.
-///
-/// This is useful for creating protectors from FFI callbacks.
-pub struct FnSocketProtector<F> {
-    protect_fn: F,
-}
-
-impl<F> FnSocketProtector<F>
-where
-    F: Fn(i32) -> io::Result<()> + Send + Sync,
-{
-    /// Create a new function-based socket protector.
-    pub fn new(f: F) -> Self {
-        Self { protect_fn: f }
-    }
-}
-
-impl<F> SocketProtector for FnSocketProtector<F>
-where
-    F: Fn(i32) -> io::Result<()> + Send + Sync,
-{
-    #[cfg(unix)]
-    fn protect(&self, fd: RawFd) -> io::Result<()> {
-        (self.protect_fn)(fd)
-    }
-
-    #[cfg(not(unix))]
-    fn protect(&self, fd: i32) -> io::Result<()> {
-        (self.protect_fn)(fd)
-    }
-}
-
-/// Platform callbacks for TUN operations.
-///
-/// This trait provides platform-specific callbacks that the TUN server uses
-/// to communicate with the mobile app.
-pub trait PlatformCallbacks: Send + Sync {
-    /// Called when the TUN service has started successfully.
-    fn on_started(&self);
-
-    /// Called when the TUN service has stopped.
-    ///
-    /// # Arguments
-    /// * `error` - If the service stopped due to an error, the error message.
-    ///             `None` if the service stopped normally.
-    fn on_stopped(&self, error: Option<String>);
-
-    /// Called periodically with traffic statistics.
-    ///
-    /// # Arguments
-    /// * `upload_bytes` - Total bytes uploaded since start.
-    /// * `download_bytes` - Total bytes downloaded since start.
-    fn on_traffic_update(&self, upload_bytes: u64, download_bytes: u64);
-}
-
-/// No-op platform callbacks for standalone/CLI usage.
-#[derive(Debug, Clone, Default)]
-pub struct NoOpPlatformCallbacks;
-
-impl PlatformCallbacks for NoOpPlatformCallbacks {
-    fn on_started(&self) {}
-    fn on_stopped(&self, _error: Option<String>) {}
-    fn on_traffic_update(&self, _upload_bytes: u64, _download_bytes: u64) {}
-}
-
-/// Combined platform interface for TUN operations.
-///
-/// This bundles socket protection and platform callbacks together.
-pub struct PlatformInterface {
-    /// Socket protector for Android VPN protection.
-    pub socket_protector: Arc<dyn SocketProtector>,
-    /// Platform callbacks for status updates.
-    pub callbacks: Arc<dyn PlatformCallbacks>,
-}
-
-impl Default for PlatformInterface {
-    fn default() -> Self {
-        Self {
-            socket_protector: Arc::new(NoOpSocketProtector),
-            callbacks: Arc::new(NoOpPlatformCallbacks),
-        }
-    }
-}
-
-impl PlatformInterface {
-    /// Create a new platform interface with custom protector and callbacks.
-    pub fn new(
-        socket_protector: Arc<dyn SocketProtector>,
-        callbacks: Arc<dyn PlatformCallbacks>,
-    ) -> Self {
-        Self {
-            socket_protector,
-            callbacks,
-        }
-    }
-
-    /// Create a platform interface with only socket protection.
-    pub fn with_protector(socket_protector: Arc<dyn SocketProtector>) -> Self {
-        Self {
-            socket_protector,
-            callbacks: Arc::new(NoOpPlatformCallbacks),
-        }
-    }
-}
-
 // On Android, sockets need protection from VPN routing. This global protector
 // provides a callback for the connection infrastructure.
 //
@@ -201,7 +96,7 @@ pub fn set_global_socket_protector(protector: Arc<dyn SocketProtector>) {
 /// Get the global socket protector.
 ///
 /// Returns the set protector, or a no-op protector if none was set.
-pub fn get_global_socket_protector() -> Arc<dyn SocketProtector> {
+fn get_global_socket_protector() -> Arc<dyn SocketProtector> {
     GLOBAL_SOCKET_PROTECTOR
         .read()
         .unwrap()
@@ -238,22 +133,5 @@ mod tests {
     fn test_noop_protector() {
         let protector = NoOpSocketProtector;
         assert!(protector.protect(42).is_ok());
-    }
-
-    #[test]
-    fn test_fn_protector() {
-        let protector = FnSocketProtector::new(|fd| {
-            assert_eq!(fd, 42);
-            Ok(())
-        });
-        assert!(protector.protect(42).is_ok());
-    }
-
-    #[test]
-    fn test_fn_protector_error() {
-        let protector = FnSocketProtector::new(|_fd| {
-            Err(io::Error::new(io::ErrorKind::Other, "protection failed"))
-        });
-        assert!(protector.protect(42).is_err());
     }
 }

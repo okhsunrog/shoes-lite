@@ -12,6 +12,12 @@ pub struct StreamReader {
     end_offset: usize,
 }
 
+impl Default for StreamReader {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl StreamReader {
     pub fn new() -> Self {
         Self::new_with_buffer_size(DEFAULT_BUFFER_SIZE)

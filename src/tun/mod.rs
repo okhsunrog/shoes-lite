@@ -38,11 +38,7 @@ mod udp_handler;
 mod udp_manager;
 
 mod platform;
-pub use platform::{
-    FnSocketProtector, NoOpPlatformCallbacks, NoOpSocketProtector, PlatformCallbacks,
-    PlatformInterface, SocketProtector, get_global_socket_protector, protect_socket,
-    set_global_socket_protector,
-};
+pub use platform::{SocketProtector, protect_socket, set_global_socket_protector};
 
 pub use tun_server::TunServerConfig;
 

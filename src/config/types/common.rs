@@ -119,7 +119,7 @@ impl<'de> serde::de::Deserialize<'de> for NetLocationPortRange {
         D: serde::de::Deserializer<'de>,
     {
         let value = String::deserialize(deserializer)?;
-        let net_location_port_range = NetLocationPortRange::from_str(&value).map_err(|e| {
+        let net_location_port_range = NetLocationPortRange::parse(&value).map_err(|e| {
             serde::de::Error::invalid_value(
                 serde::de::Unexpected::Other(&format!("invalid net location port range: {e}")),
                 &"valid net location port range (address:port[-port][,port])",
