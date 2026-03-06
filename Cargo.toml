@@ -18,32 +18,32 @@ name = "shoes-lite"
 path = "src/main.rs"
 
 [dependencies]
-async-trait = "*"
-aws-lc-rs = { version = "*", default-features = false }
-base64 = "*"
-bytes = "*"
-chrono = "*"
-etherparse = "*"
-futures = "*"
+async-trait = "0.1"
+aws-lc-rs = { version = "1", default-features = false }
+base64 = "0.22"
+bytes = "1"
+chrono = "0.4"
+etherparse = "0.19"
+futures = "0.3"
 hickory-resolver = { git = "https://github.com/hickory-dns/hickory-dns", default-features = false, features = ["tokio", "tls-aws-lc-rs", "https-aws-lc-rs", "h3-aws-lc-rs"] }
-indexmap = "*"
-log = { version = "*", features = ["std", "release_max_level_info"] }
-lru = "*"
-memchr = "*"
-notify = "*"
-parking_lot = "*"
-quinn = { version = "*", default-features = false, features = ["log", "platform-verifier", "runtime-tokio", "rustls-aws-lc-rs"] }
+indexmap = "2"
+log = { version = "0.4", features = ["std", "release_max_level_info"] }
+lru = "0.16"
+memchr = "2"
+notify = "8"
+parking_lot = "0.12"
+quinn = { version = "0.11", default-features = false, features = ["log", "platform-verifier", "runtime-tokio", "rustls-aws-lc-rs"] }
 rand = "0.9"
 rand_core = "0.9"
-rcgen = { version = "*", default-features = false, features = ["aws_lc_rs", "pem"] }
+rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem"] }
 rustc-hash = "2"
-rustls = "*"
-serde = { version = "*", features = ["derive", "std"] }
-serde_yaml = "*"
-smoltcp = { version = "*", default-features = false, features = ["std", "log", "medium-ip", "proto-ipv4", "proto-ipv6", "socket-icmp", "socket-udp", "socket-tcp", "socket-tcp-cubic", "assembler-max-segment-count-32"] }
+rustls = "0.23"
+serde = { version = "1", features = ["derive", "std"] }
+serde_yaml = "0.9"
+smoltcp = { version = "0.12", default-features = false, features = ["std", "log", "medium-ip", "proto-ipv4", "proto-ipv6", "socket-icmp", "socket-udp", "socket-tcp", "socket-tcp-cubic", "assembler-max-segment-count-32"] }
 socket2 = "0.6"
-subtle = "*"
-tokio = { version = "*", features = [
+subtle = "2"
+tokio = { version = "1", features = [
     "fs",
     "io-util",
     "macros",
@@ -52,25 +52,25 @@ tokio = { version = "*", features = [
     "sync",
     "time",
 ] }
-tokio-util = { version = "*", features = ["time"] }
-tun = { version = "*", features = ["async"] }
-url = "*"
-webpki-roots = { version = "*" }
-x509-parser = { version = "*", default-features = false, features = ["verify-aws"] }
+tokio-util = { version = "0.7", features = ["time"] }
+tun = { version = "0.8", features = ["async"] }
+url = "2"
+webpki-roots = "1"
+x509-parser = { version = "0.18", default-features = false, features = ["verify-aws"] }
 
 [dev-dependencies]
-rcgen = { version = "*", default-features = false, features = ["aws_lc_rs", "pem"] }
-rustls-pemfile = "*"
-serde_json = "*"
-tempfile = "*"
-tokio-rustls = "*"
+rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem"] }
+rustls-pemfile = "2"
+serde_json = "1"
+tempfile = "3"
+tokio-rustls = "0.26"
 
 # jemalloc for better memory performance (not supported on Windows MSVC or iOS)
 [target.'cfg(unix)'.dependencies]
-libc = "*"
+libc = "0.2"
 
 [target.'cfg(not(any(target_env = "msvc", target_os = "ios")))'.dependencies]
-tikv-jemallocator = "*"
+tikv-jemallocator = "0.6"
 
 [profile.release]
 opt-level = 3
