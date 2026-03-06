@@ -12,13 +12,16 @@
 //! └─────────────────┘     └─────────────────┘     └─────────────────┘
 //! ```
 //!
-//! The smoltcp stack runs in a dedicated OS thread with direct fd access,
-//! using `select()` for efficient event-driven I/O.
+//! The smoltcp stack runs in a tokio task, using `tun::AsyncDevice` for
+//! cross-platform async packet I/O.
 //!
 //! # Platform Support
 //!
 //! - **Linux**: Creates TUN device with specified name/address. Requires root
 //!   privileges or `CAP_NET_ADMIN` capability.
+//!
+//! - **Windows**: Creates TUN device via Wintun driver. Requires `wintun.dll`
+//!   in the application directory or PATH.
 //!
 //! - **Android**: Accepts raw FD from `VpnService.Builder.establish()`. The
 //!   VPN configuration (routes, DNS, etc.) is handled by the Android VpnService.
@@ -29,7 +32,7 @@
 //!   directly, or `false` if using the readPackets/writePackets API.
 
 mod tcp_conn;
-mod tcp_stack_direct;
+mod tcp_stack;
 mod tun_server;
 mod udp_handler;
 mod udp_manager;
@@ -44,7 +47,6 @@ pub use platform::{
 pub use tun_server::TunServerConfig;
 
 use std::net::SocketAddr;
-use std::os::unix::io::IntoRawFd;
 use std::sync::Arc;
 
 use log::{debug, info, warn};
@@ -59,7 +61,7 @@ use crate::config::selection::ConfigSelection;
 use crate::resolver::{NativeResolver, Resolver};
 use crate::tcp::tcp_client_handler_factory::create_tcp_client_proxy_selector;
 
-use tcp_stack_direct::{NewTcpConnection, TcpStackDirect};
+use tcp_stack::TcpStack;
 use udp_manager::TunUdpManager;
 
 type PacketBuffer = Vec<u8>;
@@ -67,11 +69,10 @@ type PacketBuffer = Vec<u8>;
 /// Run the TUN server with the given configuration.
 ///
 /// This function:
-/// 1. Creates/wraps a TUN device
-/// 2. Sets up our smoltcp-based TCP/IP stack with direct fd access
-/// 3. The stack thread reads packets directly from TUN using select()
-/// 4. Handles TCP connections through the proxy chain
-/// 5. Handles UDP packets through tokio (forwarded from stack thread)
+/// 1. Creates an async TUN device
+/// 2. Sets up the smoltcp-based TCP/IP stack in a tokio task
+/// 3. Handles TCP connections through the proxy chain
+/// 4. Handles UDP packets through tokio
 pub async fn run_tun_server(
     config: TunServerConfig,
     proxy_selector: Arc<ClientProxySelector>,
@@ -80,34 +81,31 @@ pub async fn run_tun_server(
     stats: Option<Arc<TunnelStats>>,
 ) -> std::io::Result<()> {
     info!(
-        "Starting TUN server (direct mode): mtu={}, tcp={}, udp={}, icmp={}",
+        "Starting TUN server: mtu={}, tcp={}, udp={}, icmp={}",
         config.mtu, config.tcp_enabled, config.udp_enabled, config.icmp_enabled
     );
 
-    let fd = if let Some(fd) = config.raw_fd {
-        info!("Using provided raw FD: {}", fd);
-        fd
-    } else {
-        let tun_device = config.create_sync_device()?;
-        let fd = tun_device.into_raw_fd();
-        info!("Created TUN device with FD: {}", fd);
-        fd
-    };
-
     let mtu = config.mtu as usize;
+    let tun_device = config.create_async_device()?;
+    info!("Created async TUN device");
 
-    // Create the direct TCP stack (runs smoltcp in dedicated thread with select())
-    let mut tcp_stack = TcpStackDirect::new(fd, mtu);
+    let mut tcp_stack = TcpStack::new();
 
-    // Get UDP receiver (stack thread filters UDP and sends here)
+    // Get UDP receiver (stack filters UDP and sends here)
     let udp_from_stack_rx = tcp_stack.take_udp_rx().expect("udp_rx already taken");
 
-    // Channel for sending UDP responses back (stack thread will write to TUN)
+    // Channel for sending UDP responses back (stack will write to TUN)
     let (udp_to_stack_tx, udp_to_stack_rx) = mpsc::unbounded_channel::<PacketBuffer>();
-    tcp_stack.set_udp_response_tx(udp_to_stack_rx);
 
-    let (tcp_conn_tx, mut tcp_conn_rx) = mpsc::unbounded_channel::<NewTcpConnection>();
-    tcp_stack.set_new_conn_tx(tcp_conn_tx);
+    // Get TCP connection receiver
+    let mut tcp_conn_rx = tcp_stack
+        .take_new_conn_rx()
+        .expect("new_conn_rx already taken");
+
+    // Spawn the smoltcp stack task
+    let stack_task: JoinHandle<()> = tokio::spawn(async move {
+        tcp_stack.run(tun_device, mtu, udp_to_stack_rx).await;
+    });
 
     let tcp_task: Option<JoinHandle<()>> = if config.tcp_enabled {
         let proxy_selector = proxy_selector.clone();
@@ -169,18 +167,13 @@ pub async fn run_tun_server(
 
     info!("TUN server started successfully");
 
-    // Wait for shutdown signal or stack thread exit
+    // Wait for shutdown signal or stack task exit
     tokio::select! {
         _ = &mut shutdown_rx => {
             info!("TUN server shutdown requested");
         }
-        _ = async {
-            // Poll until stack stops running
-            while tcp_stack.is_running() {
-                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-            }
-        } => {
-            warn!("Stack thread ended unexpectedly");
+        _ = stack_task => {
+            warn!("Stack task ended unexpectedly");
         }
     }
 
@@ -190,8 +183,6 @@ pub async fn run_tun_server(
     if let Some(t) = udp_task {
         t.abort();
     }
-
-    // tcp_stack is dropped here, which stops the stack thread
 
     info!("TUN server stopped");
     Ok(())
@@ -276,12 +267,7 @@ async fn handle_tcp_connection(
     }
 }
 
-/// Handle UDP packets from the stack thread.
-///
-/// Uses the session-based TunUdpManager which:
-/// - Keys sessions by local (app) address, not by destination
-/// - Stores the return address in each session
-/// - Routes responses using the stored address (no NAT table lookup)
+/// Handle UDP packets from the stack.
 async fn handle_udp_packets(
     from_stack_rx: mpsc::UnboundedReceiver<PacketBuffer>,
     to_stack_tx: mpsc::UnboundedSender<PacketBuffer>,

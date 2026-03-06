@@ -37,7 +37,7 @@
 use std::net::IpAddr;
 
 use log::info;
-use tun::{Configuration as TunConfiguration, Device};
+use tun::{AsyncDevice, Configuration as TunConfiguration};
 
 /// Configuration for the TUN server.
 ///
@@ -206,11 +206,11 @@ impl TunServerConfig {
         self
     }
 
-    /// Create a synchronous TUN device from this configuration.
+    /// Create an async TUN device from this configuration.
     ///
-    /// This is used by the direct mode stack which reads/writes directly
-    /// from the TUN fd using select() for event-driven I/O.
-    pub fn create_sync_device(&self) -> std::io::Result<Device> {
+    /// Uses `tun::AsyncDevice` for cross-platform async I/O (Linux, Windows,
+    /// Android, iOS/macOS).
+    pub fn create_async_device(&self) -> std::io::Result<AsyncDevice> {
         let mut config = TunConfiguration::default();
         config.mtu(self.mtu);
 
@@ -234,6 +234,23 @@ impl TunServerConfig {
             config.up();
         }
 
+        #[cfg(target_os = "windows")]
+        {
+            if let Some(ref name) = self.tun_name {
+                config.tun_name(name);
+            }
+            if let Some(addr) = self.address {
+                config.address(addr);
+            }
+            if let Some(mask) = self.netmask {
+                config.netmask(mask);
+            }
+            if let Some(dest) = self.destination {
+                config.destination(dest);
+            }
+            config.up();
+        }
+
         #[cfg(target_os = "ios")]
         {
             config.platform_config(|p| {
@@ -243,7 +260,6 @@ impl TunServerConfig {
 
         #[cfg(target_os = "android")]
         {
-            // Android requires raw_fd from VpnService.Builder.establish()
             if self.raw_fd.is_none() {
                 return Err(std::io::Error::other(
                     "Android requires raw_fd from VpnService.Builder.establish()",
@@ -272,7 +288,7 @@ impl TunServerConfig {
             }
         }
 
-        tun::create(&config)
+        tun::create_as_async(&config)
             .map_err(|e| std::io::Error::other(format!("Failed to create TUN device: {}", e)))
     }
 }

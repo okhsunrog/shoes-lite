@@ -11,8 +11,9 @@ use std::{
     pin::Pin,
     sync::Arc,
     task::{Context, Poll, Waker},
-    thread::Thread,
 };
+
+use tokio::sync::Notify;
 
 use parking_lot::Mutex;
 use smoltcp::storage::RingBuffer;
@@ -164,18 +165,21 @@ impl TcpConnectionControl {
 /// Implements AsyncRead and AsyncWrite for use with tokio.
 pub struct TcpConnection {
     control: Arc<TcpConnectionControl>,
-    thread: Thread,
+    stack_notify: Arc<Notify>,
 }
 
 impl TcpConnection {
     /// Create a new TCP connection.
-    pub fn new(control: Arc<TcpConnectionControl>, thread: Thread) -> Self {
-        Self { control, thread }
+    pub fn new(control: Arc<TcpConnectionControl>, stack_notify: Arc<Notify>) -> Self {
+        Self {
+            control,
+            stack_notify,
+        }
     }
 
-    /// Wake up the stack thread.
+    /// Wake up the smoltcp stack task.
     fn notify(&self) {
-        self.thread.unpark();
+        self.stack_notify.notify_one();
     }
 }
 

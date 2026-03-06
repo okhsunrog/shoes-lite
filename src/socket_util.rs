@@ -1,6 +1,9 @@
 use std::mem::ManuallyDrop;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+#[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd};
+#[cfg(windows)]
+use std::os::windows::io::{AsRawSocket, FromRawSocket};
 use std::path::Path;
 
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
@@ -81,10 +84,18 @@ pub fn new_socket2_udp_socket_with_buffer_size(
 }
 
 fn into_tokio_udp_socket(socket: socket2::Socket) -> std::io::Result<tokio::net::UdpSocket> {
-    let raw_fd = socket.into_raw_fd();
-    crate::tun::protect_socket(raw_fd)?;
-    let std_udp_socket = unsafe { std::net::UdpSocket::from_raw_fd(raw_fd) };
-    tokio::net::UdpSocket::from_std(std_udp_socket)
+    #[cfg(unix)]
+    {
+        let raw_fd = socket.into_raw_fd();
+        crate::tun::protect_socket(raw_fd)?;
+        let std_udp_socket = unsafe { std::net::UdpSocket::from_raw_fd(raw_fd) };
+        tokio::net::UdpSocket::from_std(std_udp_socket)
+    }
+    #[cfg(windows)]
+    {
+        let std_udp_socket: std::net::UdpSocket = socket.into();
+        tokio::net::UdpSocket::from_std(std_udp_socket)
+    }
 }
 
 pub fn new_tcp_socket(
@@ -97,6 +108,7 @@ pub fn new_tcp_socket(
         tokio::net::TcpSocket::new_v4()?
     };
 
+    #[cfg(unix)]
     crate::tun::protect_socket(tcp_socket.as_raw_fd())?;
 
     if let Some(_b) = bind_interface {
@@ -116,8 +128,12 @@ pub fn set_tcp_keepalive(
     idle_time: std::time::Duration,
     send_interval: std::time::Duration,
 ) -> std::io::Result<()> {
-    let raw_fd = tcp_stream.as_raw_fd();
-    let socket2_socket = ManuallyDrop::new(unsafe { Socket::from_raw_fd(raw_fd) });
+    #[cfg(unix)]
+    let socket2_socket = ManuallyDrop::new(unsafe { Socket::from_raw_fd(tcp_stream.as_raw_fd()) });
+    #[cfg(windows)]
+    let socket2_socket =
+        ManuallyDrop::new(unsafe { Socket::from_raw_socket(tcp_stream.as_raw_socket()) });
+
     if idle_time.is_zero() && send_interval.is_zero() {
         socket2_socket.set_keepalive(false)?;
     } else {

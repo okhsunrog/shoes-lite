@@ -139,6 +139,7 @@ See the [examples](./examples) directory and [CONFIG.md](./CONFIG.md) for more c
 | Linux | root or `CAP_NET_ADMIN` | yes | yes |
 | Android | raw fd from `VpnService` | yes | no |
 | iOS/macOS | raw fd from `NEPacketTunnelProvider` | yes | no |
+| Windows | Wintun driver | yes | yes |
 
 ## Related Projects
 
