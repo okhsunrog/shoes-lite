@@ -9,7 +9,7 @@ Used as a dependency by VPN clients (TUN tunnel) and servers (REALITY inbound).
 - **VLESS protocol** with framing, Vision flow control, and fallback support
 - **XTLS REALITY** handshake (X25519 + HKDF + AES-256-GCM) — client and server
 - **XTLS Vision** obfuscation (padding, TLS deframing)
-- **TUN device** + smoltcp TCP/IP stack for transparent VPN mode (Linux, Android, iOS)
+- **TUN device** + async smoltcp TCP/IP stack for transparent VPN mode (Linux, Windows, macOS, Android, iOS)
 - **Multi-user server** via `VlessAuthenticator` trait
 - **VLESS URI parser** — standard `vless://` format from 3X-UI / v2rayNG
 - **Traffic stats** with atomic counters (tx/rx bytes)

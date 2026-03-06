@@ -41,7 +41,7 @@ rustls = "*"
 serde = { version = "*", features = ["derive", "std"] }
 serde_yaml = "*"
 smoltcp = { version = "*", default-features = false, features = ["std", "log", "medium-ip", "proto-ipv4", "proto-ipv6", "socket-icmp", "socket-udp", "socket-tcp", "socket-tcp-cubic", "assembler-max-segment-count-32"] }
-socket2 = "*"
+socket2 = "0.6"
 subtle = "*"
 tokio = { version = "*", features = [
     "fs",
