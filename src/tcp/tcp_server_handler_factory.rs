@@ -18,6 +18,7 @@ use crate::tls_server_handler::{
     InnerProtocol, TlsServerHandler, TlsServerTarget, VisionVlessConfig,
 };
 use crate::uuid_util::parse_uuid;
+use crate::vless::SingleUserAuthenticator;
 use crate::vless::vless_server_handler::VlessTcpServerHandler;
 
 use super::tcp_client_handler_factory::create_tcp_client_proxy_selector;
@@ -138,8 +139,9 @@ fn create_tls_server_target(
             let user_id_bytes = parse_uuid(user_id)
                 .expect("Invalid user_id UUID")
                 .into_boxed_slice();
+            let authenticator = Arc::new(SingleUserAuthenticator::new(user_id_bytes));
             InnerProtocol::VisionVless(VisionVlessConfig {
-                user_id: user_id_bytes,
+                authenticator,
                 udp_enabled: *udp_enabled,
                 fallback: fallback.clone(),
             })
@@ -209,8 +211,9 @@ fn create_reality_server_target(
             let user_id_bytes = parse_uuid(user_id)
                 .expect("Invalid user_id UUID")
                 .into_boxed_slice();
+            let authenticator = Arc::new(SingleUserAuthenticator::new(user_id_bytes));
             InnerProtocol::VisionVless(VisionVlessConfig {
-                user_id: user_id_bytes,
+                authenticator,
                 udp_enabled: *udp_enabled,
                 fallback: fallback.clone(),
             })

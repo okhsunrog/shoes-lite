@@ -16,6 +16,7 @@ use crate::tcp::tcp_handler::{TcpServerHandler, TcpServerSetupResult};
 use crate::util::write_all;
 use crate::uuid_util::parse_uuid;
 
+use super::VlessAuthenticator;
 use super::vision_stream::VisionStream;
 use super::vless_message_stream::VlessMessageStream;
 use super::vless_util::{
@@ -239,7 +240,7 @@ impl TcpServerHandler for VlessTcpServerHandler {
 /// Setup a VISION+VLESS stream from a CryptoTlsStream (for REALITY+Vision support)
 pub async fn setup_custom_tls_vision_vless_server_stream<IO>(
     mut tls_stream: CryptoTlsStream<IO>,
-    user_id: &[u8],
+    authenticator: &dyn VlessAuthenticator,
     udp_enabled: bool,
     proxy_selector: Arc<ClientProxySelector>,
     resolver: &Arc<dyn Resolver>,
@@ -267,8 +268,11 @@ where
     let header = stream_reader.peek_slice(&mut tls_stream, 17).await?;
     let target_id = &header[1..17];
 
-    // Verify user ID using constant-time comparison to prevent timing attacks
-    if user_id.ct_eq(target_id).unwrap_u8() == 0 {
+    // Verify user ID via authenticator (supports single or multi-user)
+    let mut user_uuid = [0u8; 16];
+    user_uuid.copy_from_slice(target_id);
+
+    if !authenticator.authenticate(&user_uuid) {
         debug!("VLESS/Vision UUID mismatch");
         if let Some(ref fb) = fallback {
             return vless_fallback_to_dest(tls_stream, stream_reader, fb, resolver).await;
@@ -276,9 +280,7 @@ where
         return Err(std::io::Error::other("Unknown user id"));
     }
 
-    // Both checks passed - copy UUID for VisionStream, then consume version + UUID
-    let mut user_uuid = [0u8; 16];
-    user_uuid.copy_from_slice(target_id);
+    // Auth passed - consume version + UUID
     stream_reader.consume(17);
 
     let addon_length = stream_reader.read_u8(&mut tls_stream).await?;

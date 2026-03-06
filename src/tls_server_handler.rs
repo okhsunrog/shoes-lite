@@ -14,13 +14,23 @@ use crate::tcp::tcp_handler::{TcpServerHandler, TcpServerSetupResult};
 use crate::tls_hello_parser::{ParsedClientHello, read_client_hello};
 
 use crate::address::NetLocation;
+use crate::vless::VlessAuthenticator;
 
 /// Configuration for Vision VLESS inner protocol
-#[derive(Debug, Clone)]
 pub struct VisionVlessConfig {
-    pub user_id: Box<[u8]>,
+    pub authenticator: Arc<dyn VlessAuthenticator>,
     pub udp_enabled: bool,
     pub fallback: Option<NetLocation>,
+}
+
+impl std::fmt::Debug for VisionVlessConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VisionVlessConfig")
+            .field("authenticator", &self.authenticator)
+            .field("udp_enabled", &self.udp_enabled)
+            .field("fallback", &self.fallback)
+            .finish()
+    }
 }
 
 /// What to do after TLS/Reality termination.
@@ -160,7 +170,7 @@ impl TcpServerHandler for TlsServerHandler {
                     InnerProtocol::VisionVless(vision_cfg) => {
                         crate::vless::vless_server_handler::setup_custom_tls_vision_vless_server_stream(
                             tls_stream,
-                            &vision_cfg.user_id,
+                            &*vision_cfg.authenticator,
                             vision_cfg.udp_enabled,
                             effective_selector.clone(),
                             &self.fallback_resolver,
