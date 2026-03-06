@@ -1,20 +1,20 @@
 [package]
-name = "shoes"
+name = "shoes-lite"
 version = "0.2.8"
 edition = "2024"
 license = "MIT"
-description = "A multi-protocol proxy server."
-homepage = "https://github.com/cfal/shoes/"
-repository = "https://github.com/cfal/shoes/"
+description = "A minimal VLESS+REALITY client library with TUN support."
+homepage = "https://github.com/okhsunrog/shoes-lite/"
+repository = "https://github.com/okhsunrog/shoes-lite/"
 readme = "README.md"
-keywords = ["proxy", "proxy-server", "shadowsocks", "v2ray", "vmess"]
-categories = ["command-line-utilities", "network-programming"]
+keywords = ["proxy", "vless", "reality", "vpn", "tunnel"]
+categories = ["network-programming"]
 
 [lib]
-name = "shoes"
+name = "shoes_lite"
 
 [[bin]]
-name = "shoes"
+name = "shoes-lite"
 path = "src/main.rs"
 
 [dependencies]
@@ -34,8 +34,8 @@ memchr = "*"
 notify = "*"
 parking_lot = "*"
 quinn = { version = "*", default-features = false, features = ["log", "platform-verifier", "runtime-tokio", "rustls-aws-lc-rs"] }
-rand = "*"
-rand_core = "*"
+rand = "0.9"
+rand_core = "0.9"
 rcgen = { version = "*", default-features = false, features = ["aws_lc_rs", "pem"] }
 rustc-hash = "*"
 rustls = "*"

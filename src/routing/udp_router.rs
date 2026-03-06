@@ -743,9 +743,10 @@ impl<'a> UdpRouter<'a> {
 
         for i in 0..session_count {
             let idx = (self.session_poll_position + i) % session_count;
-            let Some((&id, session)) = self.sessions.get_index_mut(idx) else {
+            let Some((id_ref, session)) = self.sessions.get_index_mut(idx) else {
                 continue;
             };
+            let id = *id_ref;
 
             if session.remote_read_eof
                 || session.in_server_write_queue >= MAX_PENDING_SERVER_WRITES_PER_SESSION
