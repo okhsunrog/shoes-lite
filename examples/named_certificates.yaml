@@ -24,31 +24,18 @@
     private key data
     -----END PRIVATE KEY-----
 
-# QUIC server using named PEM files
-- address: "0.0.0.0:443"
-  transport: quic
-  quic_settings:
-    cert: "main-server-cert"    # Reference named PEM file
-    key: "main-server-key"      # Reference named PEM file
-    client_ca_certs:
-      - "client-ca"             # Reference named CA certificate
-  protocol:
-    type: hysteria2
-    password: "my-secret-password"
-
 # TLS server reusing the same certificates
 - address: "0.0.0.0:8443"
   protocol:
     type: tls
-    sni_targets:
+    tls_targets:
       "example.com":
         cert: "main-server-cert"    # Reuse the same certificate
         key: "main-server-key"      # Reuse the same key
         client_ca_certs:
           - "client-ca"
         protocol:
-          type: vmess
-          cipher: auto
+          type: vless
           user_id: "b85798ef-e9dc-46a4-9a87-8da4499d36d0"
       "test.example.com":
         cert: "self-signed-cert"    # Use different certificate for this SNI
@@ -56,21 +43,6 @@
         protocol:
           type: vless
           user_id: "b85798ef-e9dc-46a4-9a87-8da4499d36d0"
-
-# ShadowTLS with named certificates
-- address: "0.0.0.0:9443"
-  protocol:
-    type: tls
-    shadowtls_targets:
-      "shadow.example.com":
-        password: "shadow-example-password"
-        handshake:
-          cert: "main-server-cert"
-          key: "main-server-key"
-        protocol:
-          type: shadowsocks
-          cipher: 2022-blake3-chacha20-ietf-poly1305
-          password: "N5tp51JibWA9kIPEUoDHzyyjfgkDYToOERh+u9L47fk="
 
 # Reality server (note: Reality uses X25519 keys, not certificates)
 # Reality doesn't use named PEMs for its keys since they're not certificates

@@ -76,22 +76,24 @@
 #       client_chain:
 #         - protocol:
 #             type: direct
-#     # Everything else through Shadowsocks
+#     # Everything else through VLESS proxy
 #     - masks: "0.0.0.0/0"
 #       action: allow
 #       client_chain:
-#         - address: "your-ss-server.com:8388"
+#         - address: "your-vless-server.com:443"
 #           protocol:
-#             type: shadowsocks
-#             cipher: "2022-blake3-aes-256-gcm"
-#             password: "your-password-here"
+#             type: tls
+#             sni_hostname: "your-vless-server.com"
+#             protocol:
+#               type: vless
+#               user_id: "your-uuid-here"
 
 # =============================================================================
-# Example 4: TUN VPN through Trojan Proxy
+# Example 4: TUN VPN through Reality + Vision Proxy
 # =============================================================================
-# Routes TUN traffic through a Trojan server with TLS.
+# Routes TUN traffic through a Reality + Vision server for censorship resistance.
 
-# - device_name: "tun_trojan"
+# - device_name: "tun_reality"
 #   address: "10.0.3.1"
 #   netmask: "255.255.255.0"
 #   mtu: 1500
@@ -102,13 +104,17 @@
 #     - masks: "0.0.0.0/0"
 #       action: allow
 #       client_chain:
-#         - address: "your-trojan-server.com:443"
+#         - address: "your-reality-server.com:443"
 #           protocol:
-#             type: tls
-#             sni_hostname: "your-trojan-server.com"
+#             type: reality
+#             public_key: "YOUR_PUBLIC_KEY_HERE"
+#             short_id: "0123456789abcdef"
+#             sni_hostname: "www.cloudflare.com"
+#             vision: true
 #             protocol:
-#               type: trojan
-#               password: "your-trojan-password"
+#               type: vless
+#               user_id: "your-uuid-here"
+#               udp_enabled: true
 
 # =============================================================================
 # Example 5: TUN with TCP-only (No UDP/ICMP)

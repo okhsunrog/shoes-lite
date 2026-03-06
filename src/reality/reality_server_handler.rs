@@ -11,8 +11,8 @@ use crate::client_proxy_chain::ClientProxyChain;
 use crate::client_proxy_selector::ClientProxySelector;
 use crate::crypto::{CryptoConnection, CryptoTlsStream, perform_crypto_handshake};
 use crate::resolver::Resolver;
-use crate::shadow_tls::{ParsedClientHello, parse_server_hello};
 use crate::tcp::tcp_handler::{TcpClientSetupResult, TcpServerSetupResult};
+use crate::tls_hello_parser::{ParsedClientHello, parse_server_hello};
 use crate::tls_server_handler::InnerProtocol;
 use crate::util::{allocate_vec, write_all};
 use crate::vless::tls_deframer::TlsDeframer;
@@ -289,15 +289,6 @@ pub async fn setup_reality_server_stream(
                 target.effective_selector.clone(),
                 resolver,
                 vision_cfg.fallback.clone(),
-            )
-            .await
-        }
-        InnerProtocol::Naive(naive_cfg) => {
-            crate::naiveproxy::setup_naive_server_stream(
-                tls_stream,
-                naive_cfg,
-                target.effective_selector.clone(),
-                resolver.clone(),
             )
             .await
         }

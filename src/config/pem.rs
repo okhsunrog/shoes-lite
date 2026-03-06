@@ -6,7 +6,7 @@ use log::debug;
 
 use super::types::{
     ClientChainHop, ClientConfig, ClientConfigGroup, ClientProxyConfig, Config, NamedPem,
-    PemSource, RuleActionConfig, ServerConfig, ServerProxyConfig, ShadowTlsServerHandshakeConfig,
+    PemSource, RuleActionConfig, ServerConfig, ServerProxyConfig,
 };
 use crate::config::ConfigSelection;
 
@@ -193,7 +193,6 @@ fn gather_pem_file_paths_from_server_proxy(
         ServerProxyConfig::Tls {
             tls_targets,
             default_tls_target,
-            shadowtls_targets,
             reality_targets,
             ..
         } => {
@@ -251,26 +250,6 @@ fn gather_pem_file_paths_from_server_proxy(
                 }
             }
 
-            // Process ShadowTLS targets
-            for (_, shadowtls_config) in shadowtls_targets.iter_mut() {
-                if let ShadowTlsServerHandshakeConfig::Local(ref mut handshake) =
-                    shadowtls_config.handshake
-                {
-                    process_pem_path(&mut handshake.cert, known_pem_paths, unknown_pem_paths);
-                    process_pem_path(&mut handshake.key, known_pem_paths, unknown_pem_paths);
-                }
-                // Recurse into inner protocol
-                gather_pem_file_paths_from_server_proxy(
-                    &mut shadowtls_config.protocol,
-                    known_pem_paths,
-                    unknown_pem_paths,
-                )?;
-                // Check override rules
-                for rule in shadowtls_config.override_rules.iter_mut() {
-                    gather_pem_file_paths_from_rule(rule, known_pem_paths, unknown_pem_paths);
-                }
-            }
-
             // Process Reality targets
             for (sni, reality_config) in reality_targets.iter_mut() {
                 // Validate Vision configuration
@@ -288,20 +267,6 @@ fn gather_pem_file_paths_from_server_proxy(
                 )?;
                 // Check override rules
                 for rule in reality_config.override_rules.iter_mut() {
-                    gather_pem_file_paths_from_rule(rule, known_pem_paths, unknown_pem_paths);
-                }
-            }
-        }
-        ServerProxyConfig::Websocket { targets } => {
-            for websocket_config in targets.iter_mut() {
-                // Recurse into inner protocol
-                gather_pem_file_paths_from_server_proxy(
-                    &mut websocket_config.protocol,
-                    known_pem_paths,
-                    unknown_pem_paths,
-                )?;
-                // Check override rules
-                for rule in websocket_config.override_rules.iter_mut() {
                     gather_pem_file_paths_from_rule(rule, known_pem_paths, unknown_pem_paths);
                 }
             }
@@ -399,16 +364,6 @@ fn gather_pem_file_paths_from_client_proxy(
         ClientProxyConfig::Reality { protocol, .. } => {
             // Reality doesn't have cert/key PEM files, but recurse into inner protocol
             gather_pem_file_paths_from_client_proxy(protocol, known_pem_paths, unknown_pem_paths);
-        }
-        ClientProxyConfig::ShadowTls { protocol, .. } => {
-            gather_pem_file_paths_from_client_proxy(protocol, known_pem_paths, unknown_pem_paths);
-        }
-        ClientProxyConfig::Websocket(ws_config) => {
-            gather_pem_file_paths_from_client_proxy(
-                &mut ws_config.protocol,
-                known_pem_paths,
-                unknown_pem_paths,
-            );
         }
         _ => {}
     }

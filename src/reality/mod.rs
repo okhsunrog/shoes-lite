@@ -1,5 +1,3 @@
-// Server parts not used by library's public API
-
 // REALITY protocol: TLS obfuscation using X25519, HKDF-SHA256, AES-256-GCM, HMAC-SHA512
 
 mod common;
@@ -19,11 +17,8 @@ mod reality_tls13_messages;
 mod reality_util;
 
 pub use reality_cipher_suite::{CipherSuite, DEFAULT_CIPHER_SUITES};
-// generate_keypair is used by binary, not by library's public API
-#[allow(unused_imports)]
 pub use reality_util::{decode_private_key, decode_public_key, decode_short_id, generate_keypair};
 
-// Re-exports for crypto_connection module
 pub use reality_client_connection::{
     RealityClientConfig, RealityClientConnection, feed_reality_client_connection,
 };

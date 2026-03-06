@@ -1,4 +1,4 @@
-use crate::shadow_tls::parse_server_hello;
+use crate::tls_hello_parser::parse_server_hello;
 
 // TLS record types
 const TLS_CONTENT_TYPE_HANDSHAKE: u8 = 0x16;

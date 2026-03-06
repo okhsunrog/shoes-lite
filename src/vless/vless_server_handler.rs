@@ -6,22 +6,20 @@ use subtle::ConstantTimeEq;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 
-use crate::address::{Address, NetLocation};
+use crate::address::NetLocation;
 use crate::async_stream::AsyncStream;
 use crate::client_proxy_selector::ClientProxySelector;
 use crate::crypto::CryptoTlsStream;
-use crate::h2mux::{MUX_DESTINATION_HOST, MUX_DESTINATION_PORT, handle_h2mux_session};
 use crate::resolver::Resolver;
 use crate::stream_reader::StreamReader;
 use crate::tcp::tcp_handler::{TcpServerHandler, TcpServerSetupResult};
 use crate::util::write_all;
 use crate::uuid_util::parse_uuid;
-use crate::xudp::XudpMessageStream;
 
 use super::vision_stream::VisionStream;
 use super::vless_message_stream::VlessMessageStream;
 use super::vless_util::{
-    COMMAND_MUX, COMMAND_TCP, COMMAND_UDP, XTLS_VISION_FLOW, parse_addons_from_reader,
+    COMMAND_TCP, COMMAND_UDP, XTLS_VISION_FLOW, parse_addons_from_reader,
     parse_remote_location_from_reader,
 };
 
@@ -185,38 +183,6 @@ impl TcpServerHandler for VlessTcpServerHandler {
                     parse_remote_location_from_reader(&mut stream_reader, &mut server_stream)
                         .await?;
 
-                // Check for h2mux magic destination
-                if let Address::Hostname(host) = remote_location.address()
-                    && host == MUX_DESTINATION_HOST
-                    && remote_location.port() == MUX_DESTINATION_PORT
-                {
-                    // Send VLESS success response before spawning h2mux session
-                    write_all(&mut server_stream, SERVER_RESPONSE_HEADER).await?;
-
-                    let proxy_selector = self.proxy_selector.clone();
-                    let resolver = self.resolver.clone();
-                    let udp_enabled = self.udp_enabled;
-
-                    // Pass any unparsed data for the h2mux session
-                    let initial_data = stream_reader.unparsed_data_owned();
-
-                    tokio::spawn(async move {
-                        if let Err(e) = handle_h2mux_session(
-                            server_stream,
-                            initial_data,
-                            udp_enabled,
-                            proxy_selector,
-                            resolver,
-                        )
-                        .await
-                        {
-                            debug!("H2MUX session ended: {}", e);
-                        }
-                    });
-
-                    return Ok(TcpServerSetupResult::AlreadyHandled);
-                }
-
                 let unparsed_data = stream_reader.unparsed_data();
 
                 Ok(TcpServerSetupResult::TcpForward {
@@ -256,28 +222,6 @@ impl TcpServerHandler for VlessTcpServerHandler {
                 Ok(TcpServerSetupResult::BidirectionalUdp {
                     remote_location,
                     stream: Box::new(vless_stream),
-                    need_initial_flush: false,
-                    proxy_selector: self.proxy_selector.clone(),
-                })
-            }
-            COMMAND_MUX => {
-                if !self.udp_enabled {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "MUX/XUDP requires UDP to be enabled",
-                    ));
-                }
-
-                // MUX/XUDP: Destination comes in XUDP frames, not VLESS header
-                let unparsed_data = stream_reader.unparsed_data();
-                write_all(&mut server_stream, SERVER_RESPONSE_HEADER).await?;
-                let mut xudp_stream = XudpMessageStream::new(server_stream);
-                if !unparsed_data.is_empty() {
-                    xudp_stream.feed_initial_read_data(unparsed_data)?;
-                }
-
-                Ok(TcpServerSetupResult::SessionBasedUdp {
-                    stream: Box::new(xudp_stream),
                     need_initial_flush: false,
                     proxy_selector: self.proxy_selector.clone(),
                 })
@@ -407,58 +351,6 @@ where
                 need_initial_flush: false,
                 proxy_selector: proxy_selector.clone(),
             })
-        }
-        COMMAND_MUX => {
-            if !udp_enabled {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "MUX/XUDP requires UDP to be enabled",
-                ));
-            }
-            // MUX/XUDP: Destination is NOT in the VLESS header - it comes in XUDP frames
-            debug!("MUX/XUDP: No destination in VLESS header (destinations come in XUDP frames)");
-            let unparsed_data = stream_reader.unparsed_data();
-
-            if flow == XTLS_VISION_FLOW {
-                debug!("Creating VISION+XUDP stream (Custom TLS) with session-based UDP sockets");
-
-                // Extract components from CryptoTlsStream
-                let (io, session) = tls_stream.into_inner();
-
-                // Create VISION stream (will send VLESS response automatically on first write)
-                let vision_stream =
-                    VisionStream::new_server(io, session, user_uuid, unparsed_data)?;
-
-                // Wrap VISION stream in XUDP stream
-                let xudp_stream = XudpMessageStream::new(Box::new(vision_stream));
-
-                Ok(TcpServerSetupResult::SessionBasedUdp {
-                    stream: Box::new(xudp_stream),
-                    need_initial_flush: false, // VisionStream sends VLESS response on first write
-                    proxy_selector: proxy_selector.clone(),
-                })
-            } else {
-                debug!(
-                    "Creating XUDP stream (Custom TLS, no VISION) with session-based UDP sockets"
-                );
-
-                // Send VLESS response header immediately
-                write_all(&mut tls_stream, SERVER_RESPONSE_HEADER).await?;
-
-                // Wrap TLS stream in XUDP stream
-                let mut xudp_stream = XudpMessageStream::new(Box::new(tls_stream));
-
-                // Feed any unparsed data to XUDP stream
-                if !unparsed_data.is_empty() {
-                    xudp_stream.feed_initial_read_data(unparsed_data)?;
-                }
-
-                Ok(TcpServerSetupResult::SessionBasedUdp {
-                    stream: Box::new(xudp_stream),
-                    need_initial_flush: false, // Response already sent above
-                    proxy_selector,
-                })
-            }
         }
         unknown_protocol_type => Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,

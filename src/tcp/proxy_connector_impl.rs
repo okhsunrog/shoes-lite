@@ -122,9 +122,9 @@ mod tests {
     fn test_from_proxy_config_returns_some() {
         let config = ClientConfig {
             address: NetLocation::from_ip_addr(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 1080),
-            protocol: ClientProxyConfig::Socks {
-                username: None,
-                password: None,
+            protocol: ClientProxyConfig::Vless {
+                user_id: "10000000-0000-4000-a000-000000000001".to_string(),
+                udp_enabled: true,
             },
             ..Default::default()
         };

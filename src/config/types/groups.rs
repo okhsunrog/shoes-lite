@@ -270,9 +270,9 @@ mod tests {
         ClientConfig {
             bind_interface: crate::option_util::NoneOrOne::One("eth0".to_string()),
             address: NetLocation::from_ip_addr(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)), 1080),
-            protocol: ClientProxyConfig::Socks {
-                username: Some("client_user".to_string()),
-                password: Some("client_pass".to_string()),
+            protocol: ClientProxyConfig::Vless {
+                user_id: "10000000-0000-4000-a000-000000000001".to_string(),
+                udp_enabled: true,
             },
             transport: Transport::Tcp,
             tcp_settings: None,
@@ -309,10 +309,9 @@ mod tests {
                 ConfigSelection::Config(ClientConfig {
                     bind_interface: crate::option_util::NoneOrOne::None,
                     address: NetLocation::from_ip_addr(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 53),
-                    protocol: ClientProxyConfig::Http {
-                        username: None,
-                        password: None,
-                        resolve_hostname: false,
+                    protocol: ClientProxyConfig::Vless {
+                        user_id: "20000000-0000-4000-a000-000000000002".to_string(),
+                        udp_enabled: false,
                     },
                     transport: Transport::Tcp,
                     tcp_settings: None,
@@ -564,7 +563,8 @@ client_proxies:
   client_proxies:
     - address: "127.0.0.1:9090"
       protocol:
-        type: socks
+        type: vless
+        user_id: "10000000-0000-4000-a000-000000000001"
   extra_field: "should fail"
 "#;
         let result: Result<Vec<Config>, _> = serde_yaml::from_str(yaml);

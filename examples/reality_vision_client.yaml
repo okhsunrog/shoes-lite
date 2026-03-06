@@ -5,10 +5,11 @@
 # Vision provides zero-copy performance for TLS-in-TLS scenarios
 # Together they offer both benefits with VLESS as the inner protocol
 
-# Local SOCKS proxy using Reality + Vision
-- address: "127.0.0.1:1080"
+# VLESS server that uses Reality + Vision client for upstream
+- address: "0.0.0.0:16823"
   protocol:
-    type: socks
+    type: vless
+    user_id: "b85798ef-e9dc-46a4-9a87-8da4499d36d0"
   rules:
     - masks: "0.0.0.0/0"
       action: allow

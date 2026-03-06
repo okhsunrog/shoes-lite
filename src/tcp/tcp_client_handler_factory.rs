@@ -4,40 +4,15 @@ use std::sync::Arc;
 
 use log::debug;
 
-use crate::anytls::{AnyTlsClientHandler, PaddingFactory};
 use crate::client_proxy_selector::{ClientProxySelector, ConnectAction, ConnectRule};
-use crate::config::{
-    ClientProxyConfig, RuleActionConfig, RuleConfig, ShadowsocksConfig, TlsClientConfig,
-    WebsocketClientConfig,
-};
-use crate::h2mux::H2MuxClientHandler;
-use crate::http_handler::HttpTcpClientHandler;
-use crate::naiveproxy::NaiveProxyTcpClientHandler;
-use crate::port_forward_handler::PortForwardClientHandler;
+use crate::config::{ClientProxyConfig, RuleActionConfig, RuleConfig, TlsClientConfig};
 use crate::resolver::Resolver;
 use crate::rustls_config_util::create_client_config;
-use crate::shadow_tls::ShadowTlsClientHandler;
-use crate::shadowsocks::ShadowsocksTcpHandler;
-use crate::snell::snell_handler::SnellClientHandler;
-use crate::socks_handler::SocksTcpClientHandler;
 use crate::tcp::chain_builder::build_client_chain_group;
 use crate::tcp::tcp_handler::TcpClientHandler;
 use crate::tls_client_handler::TlsClientHandler;
-use crate::trojan_handler::TrojanTcpHandler;
 use crate::uuid_util::parse_uuid;
 use crate::vless::vless_client_handler::VlessTcpClientHandler;
-use crate::vmess::VmessTcpClientHandler;
-use crate::websocket::WebsocketTcpClientHandler;
-
-fn create_auth_credentials(
-    username: Option<String>,
-    password: Option<String>,
-) -> Option<(String, String)> {
-    match (&username, &password) {
-        (None, None) => None,
-        _ => Some((username.unwrap_or_default(), password.unwrap_or_default())),
-    }
-}
 
 pub fn create_tcp_client_handler(
     client_proxy_config: ClientProxyConfig,
@@ -48,79 +23,10 @@ pub fn create_tcp_client_handler(
         ClientProxyConfig::Direct => {
             panic!("Tried to create a direct tcp client handler");
         }
-        ClientProxyConfig::Http {
-            username,
-            password,
-            resolve_hostname,
-        } => {
-            let http_resolver = if resolve_hostname {
-                Some(resolver.clone())
-            } else {
-                None
-            };
-            Box::new(HttpTcpClientHandler::new(
-                create_auth_credentials(username, password),
-                http_resolver,
-            ))
-        }
-        ClientProxyConfig::Socks { username, password } => Box::new(SocksTcpClientHandler::new(
-            create_auth_credentials(username, password),
-        )),
-        ClientProxyConfig::Shadowsocks {
-            config,
-            udp_enabled,
-        } => match config {
-            ShadowsocksConfig::Legacy { cipher, password } => Box::new(
-                ShadowsocksTcpHandler::new_client(cipher, &password, udp_enabled),
-            ),
-            ShadowsocksConfig::Aead2022 { cipher, key_bytes } => Box::new(
-                ShadowsocksTcpHandler::new_aead2022_client(cipher, &key_bytes, udp_enabled),
-            ),
-        },
-        ClientProxyConfig::Snell {
-            config: ShadowsocksConfig::Legacy { cipher, password },
-            udp_enabled,
-        } => Box::new(SnellClientHandler::new(cipher, &password, udp_enabled)),
-        ClientProxyConfig::Snell {
-            config: ShadowsocksConfig::Aead2022 { .. },
-            ..
-        } => {
-            panic!(
-                "Snell does not support shadowsocks 2022 ciphers (checked during config validation)"
-            )
-        }
         ClientProxyConfig::Vless {
             user_id,
             udp_enabled,
-            h2mux,
-        } => {
-            let handler: Box<dyn TcpClientHandler> =
-                Box::new(VlessTcpClientHandler::new(&user_id, udp_enabled));
-            if let Some(h2mux_config) = h2mux {
-                Box::new(H2MuxClientHandler::new(
-                    Arc::from(handler),
-                    h2mux_config.to_options(),
-                ))
-            } else {
-                handler
-            }
-        }
-        ClientProxyConfig::Trojan {
-            password,
-            shadowsocks,
-            h2mux,
-        } => {
-            let handler: Box<dyn TcpClientHandler> =
-                Box::new(TrojanTcpHandler::new_client(&password, &shadowsocks));
-            if let Some(h2mux_config) = h2mux {
-                Box::new(H2MuxClientHandler::new(
-                    Arc::from(handler),
-                    h2mux_config.to_options(),
-                ))
-            } else {
-                handler
-            }
-        }
+        } => Box::new(VlessTcpClientHandler::new(&user_id, udp_enabled)),
         ClientProxyConfig::Tls(tls_client_config) => {
             let TlsClientConfig {
                 verify,
@@ -147,10 +53,8 @@ pub fn create_tcp_client_handler(
             };
 
             let key_and_cert_bytes = key.zip(cert).map(|(key, cert)| {
-                // Certificates are already embedded as PEM data during config validation
                 let cert_bytes = cert.as_bytes().to_vec();
                 let key_bytes = key.as_bytes().to_vec();
-
                 (key_bytes, cert_bytes)
             });
 
@@ -160,13 +64,11 @@ pub fn create_tcp_client_handler(
                 alpn_protocols.into_vec(),
                 sni_hostname.is_some(),
                 key_and_cert_bytes,
-                false, // tls13_only
+                false,
             ));
 
             let server_name = match sni_hostname {
                 Some(s) => rustls::pki_types::ServerName::try_from(s).unwrap(),
-                // This is unused, since enable_sni is false, but connect_with still requires a
-                // parameter.
                 None => "example.com".try_into().unwrap(),
             };
 
@@ -174,10 +76,8 @@ pub fn create_tcp_client_handler(
                 let ClientProxyConfig::Vless {
                     user_id,
                     udp_enabled,
-                    h2mux: _, // h2mux not supported with vision
                 } = protocol.as_ref()
                 else {
-                    // Validated when loading config
                     unreachable!();
                 };
                 let user_id_bytes = parse_uuid(user_id)
@@ -209,15 +109,12 @@ pub fn create_tcp_client_handler(
             vision,
             protocol,
         } => {
-            // Decode public key from base64url
             let public_key_bytes =
                 crate::reality::decode_public_key(&public_key).expect("Invalid REALITY public key");
 
-            // Decode short ID from hex string
             let short_id_bytes =
                 crate::reality::decode_short_id(&short_id).expect("Invalid REALITY short_id");
 
-            // Determine SNI hostname
             let sni_hostname = sni_hostname.or(default_sni_hostname.clone());
             let server_name = match sni_hostname {
                 Some(s) => rustls::pki_types::ServerName::try_from(s)
@@ -234,7 +131,6 @@ pub fn create_tcp_client_handler(
                 let ClientProxyConfig::Vless {
                     user_id,
                     udp_enabled,
-                    h2mux: _, // h2mux not supported with vision
                 } = protocol.as_ref()
                 else {
                     unreachable!("Vision requires VLESS (should be validated during config load)")
@@ -263,101 +159,6 @@ pub fn create_tcp_client_handler(
                 ))
             }
         }
-        ClientProxyConfig::ShadowTls {
-            password,
-            sni_hostname,
-            protocol,
-        } => {
-            let sni_hostname = sni_hostname.or(default_sni_hostname);
-            let enable_sni = sni_hostname.is_some();
-
-            let server_name = match sni_hostname {
-                Some(s) => rustls::pki_types::ServerName::try_from(s).unwrap(),
-                None => "example.com".try_into().unwrap(), // Fallback
-            };
-
-            // Create TLS config for ShadowTLS - must be TLS 1.3 only.
-            // ShadowTLS v3 requires TLS 1.3: we modify the ClientHello session_id to embed
-            // an HMAC tag, and rustls doesn't validate session_id echo for TLS 1.3 ServerHello.
-            // TLS 1.2 would fail anyway (no supported_versions extension), but restricting
-            // here provides defense in depth and fails fast at the TLS level.
-            let client_config = Arc::new(create_client_config(
-                false,      // No WebPKI verification needed for ShadowTLS
-                Vec::new(), // No fingerprints
-                Vec::new(), // No ALPN
-                enable_sni, // Enable SNI if hostname provided
-                None,       // No client cert
-                true,       // tls13_only - required for ShadowTLS v3
-            ));
-
-            let handler = create_tcp_client_handler(*protocol, None, resolver.clone());
-
-            Box::new(ShadowTlsClientHandler::new(
-                password,
-                client_config,
-                server_name,
-                handler,
-            ))
-        }
-        ClientProxyConfig::Vmess {
-            cipher,
-            user_id,
-            udp_enabled,
-            h2mux,
-        } => {
-            let handler: Box<dyn TcpClientHandler> =
-                Box::new(VmessTcpClientHandler::new(&cipher, &user_id, udp_enabled));
-            if let Some(h2mux_config) = h2mux {
-                Box::new(H2MuxClientHandler::new(
-                    Arc::from(handler),
-                    h2mux_config.to_options(),
-                ))
-            } else {
-                handler
-            }
-        }
-        ClientProxyConfig::Websocket(websocket_client_config) => {
-            let WebsocketClientConfig {
-                matching_path,
-                matching_headers,
-                ping_type,
-                protocol,
-            } = websocket_client_config;
-
-            let handler = create_tcp_client_handler(*protocol, None, resolver.clone());
-
-            Box::new(WebsocketTcpClientHandler::new(
-                matching_path,
-                matching_headers.map(|h| h.into_iter().collect()),
-                ping_type,
-                handler,
-            ))
-        }
-        ClientProxyConfig::PortForward => Box::new(PortForwardClientHandler),
-        ClientProxyConfig::Anytls {
-            password,
-            udp_enabled,
-            padding_scheme,
-        } => {
-            let padding = match padding_scheme {
-                Some(lines) => {
-                    let scheme = lines.join("\n");
-                    Arc::new(
-                        PaddingFactory::new(scheme.as_bytes())
-                            .expect("Invalid padding scheme in AnyTLS config"),
-                    )
-                }
-                None => PaddingFactory::default_factory(),
-            };
-            Box::new(AnyTlsClientHandler::new(password, padding, udp_enabled))
-        }
-        ClientProxyConfig::Naiveproxy {
-            username,
-            password,
-            padding,
-        } => Box::new(NaiveProxyTcpClientHandler::new(
-            &username, &password, padding,
-        )),
     }
 }
 
