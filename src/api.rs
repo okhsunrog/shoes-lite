@@ -1,0 +1,460 @@
+//! Public API for floppa-vless.
+//!
+//! Provides `VlessTunnel`, `VlessConfig`, and `TunnelStats` for programmatic
+//! use as a library dependency. This bypasses the YAML config engine entirely.
+
+use std::net::IpAddr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
+
+use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
+
+use crate::address::{NetLocation, NetLocationMask};
+use crate::client_proxy_chain::ClientChainGroup;
+use crate::client_proxy_selector::{ClientProxySelector, ConnectAction, ConnectRule};
+use crate::config::selection::ConfigSelection;
+use crate::config::{ClientChainHop, ClientConfig, ClientProxyConfig};
+use crate::option_util::{NoneOrOne, NoneOrSome};
+use crate::resolver::{NativeResolver, Resolver};
+use crate::tcp::chain_builder::build_client_proxy_chain;
+use crate::tun::TunServerConfig;
+
+/// Configuration for a VLESS+REALITY VPN connection.
+#[derive(Debug, Clone)]
+pub struct VlessConfig {
+    /// VLESS user ID (UUID v4).
+    pub uuid: String,
+    /// Server address as "host:port".
+    pub server_addr: String,
+    /// SNI hostname for REALITY handshake.
+    pub server_name: String,
+    /// REALITY public key (base64).
+    pub reality_public_key: String,
+    /// REALITY short ID (hex).
+    pub reality_short_id: String,
+    /// Flow control mode, e.g. "xtls-rprx-vision".
+    pub flow: Option<String>,
+    /// Client tunnel IP address, e.g. "10.0.0.2".
+    pub address: Option<String>,
+    /// Client tunnel netmask, e.g. "255.255.255.0".
+    pub netmask: Option<String>,
+    /// DNS server to use inside tunnel.
+    pub dns: Option<String>,
+    /// MTU for TUN device (default: platform-specific).
+    pub mtu: Option<u16>,
+    /// Allowed IPs for routing, e.g. "0.0.0.0/0".
+    pub allowed_ips: Option<String>,
+}
+
+impl VlessConfig {
+    /// Parse a standard VLESS URI into a VlessConfig.
+    ///
+    /// Format:
+    /// ```text
+    /// vless://UUID@HOST:PORT?encryption=none&flow=xtls-rprx-vision
+    ///   &security=reality&sni=example.com&fp=chrome
+    ///   &pbk=PUBLIC_KEY&sid=SHORT_ID&type=tcp#profile-name
+    /// ```
+    ///
+    /// VPN-specific fields (`address`, `dns`, `mtu`, `allowed_ips`) are not
+    /// part of the VLESS URI standard and will be `None`/default.
+    pub fn from_uri(uri: &str) -> Result<Self, String> {
+        let url = url::Url::parse(uri).map_err(|e| format!("Invalid URI: {e}"))?;
+
+        if url.scheme() != "vless" {
+            return Err(format!("Expected vless:// scheme, got {}://", url.scheme()));
+        }
+
+        let uuid = url.username().to_string();
+        if uuid.is_empty() {
+            return Err("Missing UUID in URI".to_string());
+        }
+
+        let host = url.host_str().ok_or("Missing host in URI")?.to_string();
+        let port = url.port().unwrap_or(443);
+        let server_addr = format!("{host}:{port}");
+
+        let params: std::collections::HashMap<String, String> = url
+            .query_pairs()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+
+        let security = params.get("security").map(|s| s.as_str()).unwrap_or("");
+        if security != "reality" {
+            return Err(format!(
+                "Expected security=reality, got security={security}"
+            ));
+        }
+
+        let server_name = params.get("sni").cloned().unwrap_or_default();
+        if server_name.is_empty() {
+            return Err("Missing sni parameter".to_string());
+        }
+
+        let reality_public_key = params
+            .get("pbk")
+            .cloned()
+            .ok_or("Missing pbk (public key) parameter")?;
+
+        let reality_short_id = params.get("sid").cloned().unwrap_or_default();
+
+        let flow = params.get("flow").cloned();
+
+        Ok(VlessConfig {
+            uuid,
+            server_addr,
+            server_name,
+            reality_public_key,
+            reality_short_id,
+            flow,
+            address: None,
+            netmask: None,
+            dns: None,
+            mtu: None,
+            allowed_ips: None,
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Stats
+// ---------------------------------------------------------------------------
+
+/// Thread-safe traffic statistics (shared between tunnel and caller).
+pub struct TunnelStats {
+    tx_bytes: AtomicU64,
+    rx_bytes: AtomicU64,
+    connected_at: Instant,
+}
+
+impl TunnelStats {
+    pub fn new() -> Self {
+        Self {
+            tx_bytes: AtomicU64::new(0),
+            rx_bytes: AtomicU64::new(0),
+            connected_at: Instant::now(),
+        }
+    }
+
+    pub fn add_tx(&self, bytes: u64) {
+        self.tx_bytes.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    pub fn add_rx(&self, bytes: u64) {
+        self.rx_bytes.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    pub fn snapshot(&self) -> TrafficStats {
+        TrafficStats {
+            tx_bytes: self.tx_bytes.load(Ordering::Relaxed),
+            rx_bytes: self.rx_bytes.load(Ordering::Relaxed),
+            connected_at: self.connected_at,
+        }
+    }
+}
+
+impl Default for TunnelStats {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Immutable snapshot of traffic statistics.
+#[derive(Debug, Clone)]
+pub struct TrafficStats {
+    pub tx_bytes: u64,
+    pub rx_bytes: u64,
+    pub connected_at: Instant,
+}
+
+impl TrafficStats {
+    pub fn duration(&self) -> Duration {
+        self.connected_at.elapsed()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Chain builder
+// ---------------------------------------------------------------------------
+
+/// Build a `ClientProxySelector` from a `VlessConfig`.
+///
+/// Creates a single catch-all rule that routes all traffic through one
+/// VLESS+REALITY chain.
+fn build_vless_selector(
+    config: &VlessConfig,
+    resolver: Arc<dyn Resolver>,
+) -> Result<ClientProxySelector, String> {
+    let server_location = NetLocation::from_str(&config.server_addr, None)
+        .map_err(|e| format!("Invalid server_addr '{}': {e}", config.server_addr))?;
+
+    let has_vision = config.flow.as_deref() == Some("xtls-rprx-vision");
+
+    let client_config = ClientConfig {
+        bind_interface: NoneOrOne::None,
+        address: server_location,
+        protocol: ClientProxyConfig::Reality {
+            public_key: config.reality_public_key.clone(),
+            short_id: config.reality_short_id.clone(),
+            sni_hostname: Some(config.server_name.clone()),
+            cipher_suites: NoneOrSome::default(),
+            vision: has_vision,
+            protocol: Box::new(ClientProxyConfig::Vless {
+                user_id: config.uuid.clone(),
+                udp_enabled: true,
+            }),
+        },
+        ..Default::default()
+    };
+
+    let chain = build_client_proxy_chain(
+        crate::option_util::OneOrSome::One(ClientChainHop::Single(ConfigSelection::Config(
+            client_config,
+        ))),
+        resolver,
+    );
+
+    let chain_group = ClientChainGroup::new(vec![chain]);
+
+    let rule = ConnectRule::new(
+        vec![NetLocationMask::ANY],
+        ConnectAction::new_allow(None, chain_group),
+    );
+
+    Ok(ClientProxySelector::new(vec![rule]))
+}
+
+// ---------------------------------------------------------------------------
+// VlessTunnel
+// ---------------------------------------------------------------------------
+
+/// A running VLESS+REALITY VPN tunnel.
+pub struct VlessTunnel {
+    shutdown_tx: Option<oneshot::Sender<()>>,
+    task_handle: JoinHandle<()>,
+    stats: Arc<TunnelStats>,
+}
+
+impl VlessTunnel {
+    /// Create a TUN device and start the VLESS+REALITY tunnel (Linux desktop).
+    pub async fn new(config: &VlessConfig, interface_name: &str) -> Result<Self, String> {
+        let mut tun_config = TunServerConfig::new().tun_name(interface_name.to_string());
+
+        if let Some(ref addr_str) = config.address {
+            let addr: IpAddr = addr_str
+                .parse()
+                .map_err(|e| format!("Invalid tunnel address '{addr_str}': {e}"))?;
+            tun_config = tun_config.address(addr);
+        }
+        if let Some(ref mask_str) = config.netmask {
+            let mask: IpAddr = mask_str
+                .parse()
+                .map_err(|e| format!("Invalid tunnel netmask '{mask_str}': {e}"))?;
+            tun_config = tun_config.netmask(mask);
+        }
+        if let Some(mtu) = config.mtu {
+            tun_config = tun_config.mtu(mtu);
+        }
+
+        Self::start(config, tun_config).await
+    }
+
+    /// Start tunnel using an existing TUN file descriptor (Android/iOS).
+    pub async fn from_fd(config: &VlessConfig, tun_fd: i32) -> Result<Self, String> {
+        let mut tun_config = TunServerConfig::new()
+            .raw_fd(tun_fd)
+            .close_fd_on_drop(false);
+
+        if let Some(mtu) = config.mtu {
+            tun_config = tun_config.mtu(mtu);
+        }
+
+        #[cfg(any(target_os = "ios", target_os = "macos"))]
+        {
+            tun_config = tun_config.packet_information(true);
+        }
+
+        Self::start(config, tun_config).await
+    }
+
+    /// Common startup logic.
+    async fn start(config: &VlessConfig, tun_config: TunServerConfig) -> Result<Self, String> {
+        let resolver: Arc<dyn Resolver> = Arc::new(NativeResolver::new());
+        let selector = Arc::new(build_vless_selector(config, resolver.clone())?);
+        let stats = Arc::new(TunnelStats::new());
+
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+
+        let stats_clone = stats.clone();
+        let task_handle = tokio::spawn(async move {
+            if let Err(e) = crate::tun::run_tun_server(
+                tun_config,
+                selector,
+                resolver,
+                shutdown_rx,
+                Some(stats_clone),
+            )
+            .await
+            {
+                log::error!("TUN server error: {e}");
+            }
+        });
+
+        Ok(Self {
+            shutdown_tx: Some(shutdown_tx),
+            task_handle,
+            stats,
+        })
+    }
+
+    /// Get current traffic statistics (non-blocking).
+    pub fn get_stats(&self) -> TrafficStats {
+        self.stats.snapshot()
+    }
+
+    /// Get connection duration.
+    pub fn connection_duration(&self) -> Duration {
+        self.stats.snapshot().duration()
+    }
+
+    /// Stop the tunnel gracefully.
+    pub async fn stop(mut self) -> Result<(), String> {
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(());
+        }
+        self.task_handle
+            .await
+            .map_err(|e| format!("Task join error: {e}"))
+    }
+}
+
+/// Set a socket protection callback (required on Android to prevent routing loops).
+///
+/// On Android, outbound sockets to the VLESS server must be "protected" via
+/// `VpnService.protect()` to avoid being routed back through the TUN device.
+/// Call this before starting the tunnel.
+pub fn set_socket_protector(protector: Arc<dyn crate::tun::SocketProtector>) {
+    crate::tun::set_global_socket_protector(protector);
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_vless_uri_basic() {
+        let uri = "vless://550e8400-e29b-41d4-a716-446655440000@example.com:443\
+                    ?encryption=none&flow=xtls-rprx-vision\
+                    &security=reality&sni=www.microsoft.com&fp=chrome\
+                    &pbk=abc123publickey&sid=deadbeef&type=tcp#my-server";
+        let config = VlessConfig::from_uri(uri).unwrap();
+        assert_eq!(config.uuid, "550e8400-e29b-41d4-a716-446655440000");
+        assert_eq!(config.server_addr, "example.com:443");
+        assert_eq!(config.server_name, "www.microsoft.com");
+        assert_eq!(config.reality_public_key, "abc123publickey");
+        assert_eq!(config.reality_short_id, "deadbeef");
+        assert_eq!(config.flow.as_deref(), Some("xtls-rprx-vision"));
+        assert!(config.address.is_none());
+        assert!(config.mtu.is_none());
+    }
+
+    #[test]
+    fn test_parse_vless_uri_default_port() {
+        let uri = "vless://uuid@host.example.com\
+                    ?security=reality&sni=sni.example.com&pbk=key123";
+        let config = VlessConfig::from_uri(uri).unwrap();
+        assert_eq!(config.server_addr, "host.example.com:443");
+        assert!(config.flow.is_none());
+        assert!(config.reality_short_id.is_empty());
+    }
+
+    #[test]
+    fn test_parse_vless_uri_custom_port() {
+        let uri = "vless://uuid@1.2.3.4:8443\
+                    ?security=reality&sni=sni.example.com&pbk=key123";
+        let config = VlessConfig::from_uri(uri).unwrap();
+        assert_eq!(config.server_addr, "1.2.3.4:8443");
+    }
+
+    #[test]
+    fn test_parse_vless_uri_wrong_scheme() {
+        let uri = "vmess://uuid@host:443?security=reality&sni=a&pbk=b";
+        let err = VlessConfig::from_uri(uri).unwrap_err();
+        assert!(err.contains("vless://"));
+    }
+
+    #[test]
+    fn test_parse_vless_uri_missing_uuid() {
+        let uri = "vless://host:443?security=reality&sni=a&pbk=b";
+        // url crate parses "host" as username when no @ present,
+        // but with this format it should fail
+        let result = VlessConfig::from_uri(uri);
+        // The host:443 part gets parsed as host, no username
+        assert!(result.is_err() || result.unwrap().uuid.is_empty());
+    }
+
+    #[test]
+    fn test_parse_vless_uri_missing_sni() {
+        let uri = "vless://uuid@host:443?security=reality&pbk=key";
+        let err = VlessConfig::from_uri(uri).unwrap_err();
+        assert!(err.contains("sni"));
+    }
+
+    #[test]
+    fn test_parse_vless_uri_missing_public_key() {
+        let uri = "vless://uuid@host:443?security=reality&sni=example.com";
+        let err = VlessConfig::from_uri(uri).unwrap_err();
+        assert!(err.contains("pbk"));
+    }
+
+    #[test]
+    fn test_parse_vless_uri_wrong_security() {
+        let uri = "vless://uuid@host:443?security=tls&sni=a&pbk=b";
+        let err = VlessConfig::from_uri(uri).unwrap_err();
+        assert!(err.contains("reality"));
+    }
+
+    #[test]
+    fn test_tunnel_stats() {
+        let stats = TunnelStats::new();
+        stats.add_tx(100);
+        stats.add_tx(200);
+        stats.add_rx(50);
+
+        let snapshot = stats.snapshot();
+        assert_eq!(snapshot.tx_bytes, 300);
+        assert_eq!(snapshot.rx_bytes, 50);
+        assert!(snapshot.duration() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn test_build_vless_selector() {
+        // Use a valid 32-byte X25519 public key (base64url-no-pad encoded)
+        let config = VlessConfig {
+            uuid: "550e8400-e29b-41d4-a716-446655440000".to_string(),
+            server_addr: "1.2.3.4:443".to_string(),
+            server_name: "www.microsoft.com".to_string(),
+            reality_public_key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_string(),
+            reality_short_id: "deadbeef".to_string(),
+            flow: Some("xtls-rprx-vision".to_string()),
+            address: None,
+            netmask: None,
+            dns: None,
+            mtu: None,
+            allowed_ips: None,
+        };
+        let resolver: Arc<dyn Resolver> = Arc::new(NativeResolver::new());
+        let selector = build_vless_selector(&config, resolver);
+        assert!(
+            selector.is_ok(),
+            "Failed to build selector: {:?}",
+            selector.err()
+        );
+    }
+}

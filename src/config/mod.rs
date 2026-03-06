@@ -62,10 +62,9 @@ pub async fn load_configs(args: &Vec<String>) -> std::io::Result<Vec<Config>> {
     Ok(all_configs)
 }
 
-/// Load config from a string (used by FFI targets)
-#[cfg(any(target_os = "android", target_os = "ios", feature = "ffi"))]
+/// Load config from a string.
 pub fn load_config_str(config_str: &str) -> std::io::Result<Vec<Config>> {
-    serde_yaml::from_str::<Vec<Config>>(&config_str).map_err(|e| {
+    serde_yaml::from_str::<Vec<Config>>(config_str).map_err(|e| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!("Could not parse config string as config YAML: {e}"),

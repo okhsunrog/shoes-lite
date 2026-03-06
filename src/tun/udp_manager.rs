@@ -21,6 +21,7 @@ use tokio::sync::mpsc;
 use tokio::time::{Instant, interval};
 
 use crate::address::{Address, NetLocation};
+use crate::api::TunnelStats;
 use crate::async_stream::AsyncMessageStream;
 use crate::client_proxy_selector::{ClientProxySelector, ConnectDecision};
 use crate::resolver::Resolver;
@@ -71,6 +72,8 @@ pub struct TunUdpManager {
     response_rx: mpsc::Receiver<UdpMessage>,
     /// Cloned into each session, then into each destination task
     response_tx: mpsc::Sender<UdpMessage>,
+    /// Optional traffic stats for the public API.
+    stats: Option<Arc<TunnelStats>>,
 }
 
 /// A UDP session for a single local (app) address.
@@ -96,6 +99,7 @@ impl TunUdpManager {
         writer: UdpWriter,
         proxy_selector: Arc<ClientProxySelector>,
         resolver: Arc<dyn Resolver>,
+        stats: Option<Arc<TunnelStats>>,
     ) -> Self {
         let (response_tx, response_rx) = mpsc::channel(RESPONSE_CHANNEL_SIZE);
 
@@ -107,6 +111,7 @@ impl TunUdpManager {
             resolver,
             response_rx,
             response_tx,
+            stats,
         }
     }
 
@@ -120,6 +125,9 @@ impl TunUdpManager {
             tokio::select! {
                 // Handle responses from destination tasks (write to TUN)
                 Some((payload, src_addr, dst_addr)) = self.response_rx.recv() => {
+                    if let Some(ref stats) = self.stats {
+                        stats.add_rx(payload.len() as u64);
+                    }
                     debug!(
                         "[TunUdpManager] Response: {} -> {} ({} bytes)",
                         src_addr, dst_addr, payload.len()
@@ -134,6 +142,9 @@ impl TunUdpManager {
                 packet = self.reader.next() => {
                     match packet {
                         Some((payload, local_addr, remote_addr)) => {
+                            if let Some(ref stats) = self.stats {
+                                stats.add_tx(payload.len() as u64);
+                            }
                             debug!(
                                 "[TunUdpManager] Packet: {} -> {} ({} bytes)",
                                 local_addr, remote_addr, payload.len()

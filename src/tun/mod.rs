@@ -34,10 +34,7 @@ mod tun_server;
 mod udp_handler;
 mod udp_manager;
 
-// Platform module only needed for mobile FFI targets
-#[cfg(any(target_os = "android", target_os = "ios", feature = "ffi"))]
 mod platform;
-#[cfg(any(target_os = "android", target_os = "ios", feature = "ffi"))]
 pub use platform::{
     FnSocketProtector, NoOpPlatformCallbacks, NoOpSocketProtector, PlatformCallbacks,
     PlatformInterface, SocketProtector, get_global_socket_protector, protect_socket,
@@ -55,6 +52,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use crate::address::{Address, NetLocation};
+use crate::api::TunnelStats;
 use crate::client_proxy_selector::ClientProxySelector;
 use crate::config::TunConfig;
 use crate::config::selection::ConfigSelection;
@@ -79,6 +77,7 @@ pub async fn run_tun_server(
     proxy_selector: Arc<ClientProxySelector>,
     resolver: Arc<dyn Resolver>,
     mut shutdown_rx: oneshot::Receiver<()>,
+    stats: Option<Arc<TunnelStats>>,
 ) -> std::io::Result<()> {
     info!(
         "Starting TUN server (direct mode): mtu={}, tcp={}, udp={}, icmp={}",
@@ -113,6 +112,7 @@ pub async fn run_tun_server(
     let tcp_task: Option<JoinHandle<()>> = if config.tcp_enabled {
         let proxy_selector = proxy_selector.clone();
         let resolver = resolver.clone();
+        let stats = stats.clone();
 
         Some(tokio::spawn(async move {
             info!("Starting TCP connection handler");
@@ -120,6 +120,7 @@ pub async fn run_tun_server(
             while let Some(new_conn) = tcp_conn_rx.recv().await {
                 let proxy_selector = proxy_selector.clone();
                 let resolver = resolver.clone();
+                let stats = stats.clone();
 
                 tokio::spawn(async move {
                     let remote_addr = new_conn.remote_addr;
@@ -127,9 +128,14 @@ pub async fn run_tun_server(
 
                     debug!("Handling TCP connection to {:?}", target);
 
-                    if let Err(e) =
-                        handle_tcp_connection(new_conn.connection, target, proxy_selector, resolver)
-                            .await
+                    if let Err(e) = handle_tcp_connection(
+                        new_conn.connection,
+                        target,
+                        proxy_selector,
+                        resolver,
+                        stats,
+                    )
+                    .await
                     {
                         debug!("TCP connection to {} failed: {}", remote_addr, e);
                     }
@@ -145,9 +151,17 @@ pub async fn run_tun_server(
     let udp_task = if config.udp_enabled {
         let proxy_selector = proxy_selector.clone();
         let resolver = resolver.clone();
+        let stats = stats.clone();
 
         Some(tokio::spawn(async move {
-            handle_udp_packets(udp_from_stack_rx, udp_to_stack_tx, proxy_selector, resolver).await;
+            handle_udp_packets(
+                udp_from_stack_rx,
+                udp_to_stack_tx,
+                proxy_selector,
+                resolver,
+                stats,
+            )
+            .await;
         }))
     } else {
         None
@@ -198,6 +212,7 @@ async fn handle_tcp_connection(
     target: NetLocation,
     proxy_selector: Arc<ClientProxySelector>,
     resolver: Arc<dyn Resolver>,
+    stats: Option<Arc<TunnelStats>>,
 ) -> std::io::Result<()> {
     let decision = proxy_selector.judge(target.into(), &resolver).await?;
 
@@ -226,6 +241,10 @@ async fn handle_tcp_connection(
 
                     match result {
                         Ok((client_to_remote, remote_to_client)) => {
+                            if let Some(ref stats) = stats {
+                                stats.add_tx(client_to_remote);
+                                stats.add_rx(remote_to_client);
+                            }
                             debug!(
                                 "TCP connection to {} completed: {} bytes sent, {} bytes received",
                                 remote_location.location(),
@@ -268,13 +287,14 @@ async fn handle_udp_packets(
     to_stack_tx: mpsc::UnboundedSender<PacketBuffer>,
     proxy_selector: Arc<ClientProxySelector>,
     resolver: Arc<dyn Resolver>,
+    stats: Option<Arc<TunnelStats>>,
 ) {
     info!("Starting UDP handler (session-based)");
 
     let udp_handler = udp_handler::UdpHandler::new(from_stack_rx, to_stack_tx);
     let (reader, writer) = udp_handler.split();
 
-    let manager = TunUdpManager::new(reader, writer, proxy_selector, resolver);
+    let manager = TunUdpManager::new(reader, writer, proxy_selector, resolver, stats);
 
     if let Err(e) = manager.run().await {
         warn!("UDP handler error: {}", e);
@@ -344,6 +364,7 @@ pub async fn run_tun_from_config(
         client_proxy_selector,
         resolver,
         shutdown_rx,
+        None,
     )
     .await
 }

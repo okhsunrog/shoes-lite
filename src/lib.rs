@@ -6,6 +6,7 @@
 //! with Vision flow control and TUN device support.
 
 mod address;
+pub mod api;
 mod async_stream;
 mod buf_reader;
 mod client_proxy_chain;
