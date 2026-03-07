@@ -2,6 +2,7 @@
 // Adapted from https://github.com/tikv/async-speed-limit (MIT / Apache-2.0)
 
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -53,33 +54,88 @@ impl Bucket {
             Duration::from_secs_f64(wait_secs)
         }
     }
+
+    fn set_speed_limit(&mut self, bytes_per_second: f64) {
+        self.speed_limit = bytes_per_second;
+        // Clamp current tokens to new capacity
+        let cap = self.capacity();
+        if self.value > cap {
+            self.value = cap;
+        }
+    }
 }
 
-/// A shared bandwidth limiter using a token bucket algorithm.
+#[derive(Debug)]
+struct LimiterInner {
+    bucket: Mutex<Bucket>,
+    bytes_read: AtomicU64,
+    bytes_written: AtomicU64,
+}
+
+/// A shared bandwidth limiter and traffic counter using a token bucket algorithm.
 ///
-/// Multiple streams can share one `Limiter` to enforce a combined bandwidth cap.
-/// Cloning a `Limiter` creates a new handle to the same underlying bucket.
+/// Multiple streams can share one `Limiter` to enforce a combined bandwidth cap
+/// and aggregate traffic statistics. Cloning a `Limiter` creates a new handle
+/// to the same underlying state.
 #[derive(Clone, Debug)]
 pub struct Limiter {
-    state: Arc<Mutex<Bucket>>,
+    inner: Arc<LimiterInner>,
 }
 
 impl Limiter {
     /// Create a new limiter with the given speed limit in bytes per second.
     pub fn new(bytes_per_second: f64) -> Self {
         Self {
-            state: Arc::new(Mutex::new(Bucket::new(bytes_per_second))),
+            inner: Arc::new(LimiterInner {
+                bucket: Mutex::new(Bucket::new(bytes_per_second)),
+                bytes_read: AtomicU64::new(0),
+                bytes_written: AtomicU64::new(0),
+            }),
         }
     }
 
+    /// Create an unlimited limiter (no throttling, traffic counting only).
+    pub fn new_unlimited() -> Self {
+        Self::new(f64::INFINITY)
+    }
+
     fn consume(&self, bytes: usize) -> Duration {
-        let mut bucket = self.state.lock().unwrap();
+        let mut bucket = self.inner.bucket.lock().unwrap();
         bucket.update(Instant::now());
         bucket.consume(bytes as f64)
     }
+
+    /// Record bytes read through this limiter.
+    pub fn record_read(&self, n: usize) {
+        self.inner.bytes_read.fetch_add(n as u64, Ordering::Relaxed);
+    }
+
+    /// Record bytes written through this limiter.
+    pub fn record_write(&self, n: usize) {
+        self.inner
+            .bytes_written
+            .fetch_add(n as u64, Ordering::Relaxed);
+    }
+
+    /// Atomically swap both counters to zero and return `(bytes_read, bytes_written)`.
+    pub fn swap_counters(&self) -> (u64, u64) {
+        let read = self.inner.bytes_read.swap(0, Ordering::Relaxed);
+        let written = self.inner.bytes_written.swap(0, Ordering::Relaxed);
+        (read, written)
+    }
+
+    /// Update the speed limit without resetting traffic counters.
+    pub fn update_speed(&self, bytes_per_second: f64) {
+        self.inner
+            .bucket
+            .lock()
+            .unwrap()
+            .set_speed_limit(bytes_per_second);
+    }
 }
 
-/// An `AsyncStream` wrapper that enforces bandwidth limits on both read and write.
+/// An `AsyncStream` wrapper that enforces bandwidth limits on both read and write,
+/// and tracks cumulative traffic through the limiter's atomic counters.
 ///
 /// Read and write directions each maintain independent delay state but share
 /// the same underlying token bucket, limiting total throughput per user.
@@ -122,6 +178,7 @@ impl<S: AsyncRead + Unpin> AsyncRead for LimitedStream<S> {
         if let Poll::Ready(Ok(())) = &result {
             let n = buf.filled().len() - filled_before;
             if n > 0 {
+                this.limiter.record_read(n);
                 let wait = this.limiter.consume(n);
                 if !wait.is_zero() {
                     this.read_delay = Some(Box::pin(tokio::time::sleep(wait)));
@@ -153,6 +210,7 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for LimitedStream<S> {
         if let Poll::Ready(Ok(n)) = &result
             && *n > 0
         {
+            this.limiter.record_write(*n);
             let wait = this.limiter.consume(*n);
             if !wait.is_zero() {
                 this.write_delay = Some(Box::pin(tokio::time::sleep(wait)));
