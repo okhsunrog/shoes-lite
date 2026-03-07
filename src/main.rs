@@ -22,6 +22,7 @@ mod rustls_config_util;
 mod rustls_connection_util;
 mod slide_buffer;
 mod socket_util;
+mod speed_limit;
 mod stream_reader;
 mod sync_adapter;
 mod tcp;

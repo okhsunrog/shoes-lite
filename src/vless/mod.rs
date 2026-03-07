@@ -14,6 +14,8 @@ mod vless_message_stream;
 mod vless_response_stream;
 mod vless_util;
 
+use crate::speed_limit::Limiter;
+
 /// Trait for authenticating VLESS UUIDs.
 ///
 /// Implement this to support multi-user VLESS servers. The default
@@ -25,6 +27,13 @@ pub trait VlessAuthenticator: Send + Sync + std::fmt::Debug {
     ///
     /// Implementations should use constant-time comparison to prevent timing attacks.
     fn authenticate(&self, uuid: &[u8; 16]) -> bool;
+
+    /// Returns an optional shared bandwidth limiter for the given user.
+    /// All connections for the same user should share the same `Limiter`
+    /// to enforce a combined bandwidth cap across connections.
+    fn get_limiter(&self, _uuid: &[u8; 16]) -> Option<Limiter> {
+        None
+    }
 }
 
 /// Single-user authenticator for backwards compatibility.

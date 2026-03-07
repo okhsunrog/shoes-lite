@@ -661,4 +661,235 @@ mod tests {
         }
         // If connect itself failed, that's also correct behavior
     }
+
+    // -----------------------------------------------------------------------
+    // E2E speed limiting tests (require Docker for dest + echo servers)
+    // Run: cd tests/docker && ./run-e2e.sh
+    // -----------------------------------------------------------------------
+
+    /// Authenticator that applies a shared bandwidth limiter per user.
+    #[derive(Debug)]
+    struct TestSpeedLimitAuthenticator {
+        user_id: [u8; 16],
+        limiter: Option<crate::speed_limit::Limiter>,
+    }
+
+    impl crate::vless::VlessAuthenticator for TestSpeedLimitAuthenticator {
+        fn authenticate(&self, uuid: &[u8; 16]) -> bool {
+            use subtle::ConstantTimeEq;
+            self.user_id.ct_eq(uuid.as_slice()).unwrap_u8() == 1
+        }
+
+        fn get_limiter(&self, _uuid: &[u8; 16]) -> Option<crate::speed_limit::Limiter> {
+            self.limiter.clone()
+        }
+    }
+
+    /// Start an in-process shoes-lite REALITY+Vision server.
+    /// Uses Docker's nginx dest (port 19443) for REALITY handshake.
+    /// Returns (server_port, public_key_b64, server_handle).
+    async fn start_shoes_reality_server(
+        uuid_str: &str,
+        speed_limit: Option<f64>,
+    ) -> (u16, String, tokio::task::JoinHandle<()>) {
+        use crate::client_proxy_chain::ClientChainGroup;
+        use crate::config::{ClientChainHop, ClientConfig};
+        use crate::option_util::OneOrSome;
+        use crate::reality::{
+            RealityServerTarget, decode_private_key, decode_short_id, generate_keypair,
+        };
+        use crate::tcp::chain_builder::build_client_proxy_chain;
+        use crate::tcp::tcp_server::process_stream;
+        use crate::tls_server_handler::{
+            InnerProtocol, TlsServerHandler, TlsServerTarget, VisionVlessConfig,
+        };
+        use rustc_hash::FxHashMap;
+
+        let (priv_key_b64, pub_key_b64) = generate_keypair().unwrap();
+        let private_key = decode_private_key(&priv_key_b64).unwrap();
+        let short_id = decode_short_id(E2E_SHORT_ID).unwrap();
+
+        let resolver: Arc<dyn Resolver> = Arc::new(NativeResolver::new());
+
+        // "Direct connect" selector for the server to reach the echo server
+        let direct_chain = build_client_proxy_chain(
+            OneOrSome::One(ClientChainHop::Single(ConfigSelection::Config(
+                ClientConfig::default(),
+            ))),
+            resolver.clone(),
+        );
+        let chain_group = ClientChainGroup::new(vec![direct_chain]);
+        let server_selector = Arc::new(ClientProxySelector::new(vec![ConnectRule::new(
+            vec![NetLocationMask::ANY],
+            ConnectAction::new_allow(None, chain_group),
+        )]));
+
+        // Direct chain for connecting to REALITY dest (nginx TLS)
+        let dest_chain = build_client_proxy_chain(
+            OneOrSome::One(ClientChainHop::Single(ConfigSelection::Config(
+                ClientConfig::default(),
+            ))),
+            resolver.clone(),
+        );
+
+        let user_uuid_bytes: [u8; 16] = crate::uuid_util::parse_uuid(uuid_str)
+            .unwrap()
+            .try_into()
+            .unwrap();
+
+        let limiter = speed_limit.map(crate::speed_limit::Limiter::new);
+        let authenticator = Arc::new(TestSpeedLimitAuthenticator {
+            user_id: user_uuid_bytes,
+            limiter,
+        });
+
+        let target = RealityServerTarget {
+            private_key,
+            short_ids: vec![short_id],
+            dest: NetLocation::from_str("localhost:19443", None).unwrap(),
+            max_time_diff: Some(60000),
+            min_client_version: None,
+            max_client_version: None,
+            cipher_suites: vec![],
+            effective_selector: server_selector,
+            inner_protocol: InnerProtocol::VisionVless(VisionVlessConfig {
+                authenticator,
+                udp_enabled: false,
+                fallback: None,
+            }),
+            dest_client_chain: dest_chain,
+        };
+
+        let mut targets = FxHashMap::default();
+        targets.insert(
+            E2E_SERVER_NAME.to_string(),
+            TlsServerTarget::Reality(target),
+        );
+
+        let handler: Arc<dyn crate::tcp::tcp_handler::TcpServerHandler> =
+            Arc::new(TlsServerHandler::new(targets, None, None, resolver.clone()));
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let server_port = listener.local_addr().unwrap().port();
+
+        let server_handle = tokio::spawn(async move {
+            loop {
+                match listener.accept().await {
+                    Ok((stream, _)) => {
+                        let handler = handler.clone();
+                        let resolver = resolver.clone();
+                        tokio::spawn(async move {
+                            let _ = process_stream(stream, handler, resolver).await;
+                        });
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        (server_port, pub_key_b64, server_handle)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore] // Requires Docker: cd tests/docker && ./run-e2e.sh
+    async fn test_e2e_shoes_reality_server() {
+        // Verify our in-process shoes-lite REALITY server works (no speed limit)
+        let uuid = E2E_UUID_VISION;
+        let (server_port, pub_key, server_handle) = start_shoes_reality_server(uuid, None).await;
+
+        let config = VlessConfig {
+            uuid: uuid.to_string(),
+            server_addr: format!("127.0.0.1:{server_port}"),
+            server_name: E2E_SERVER_NAME.to_string(),
+            reality_public_key: pub_key,
+            reality_short_id: E2E_SHORT_ID.to_string(),
+            flow: Some("xtls-rprx-vision".to_string()),
+            address: None,
+            netmask: None,
+            dns: None,
+            mtu: None,
+            allowed_ips: None,
+        };
+
+        let mut stream = tokio::time::timeout(
+            Duration::from_secs(30),
+            connect_through_vless(&config, E2E_ECHO_HOST, E2E_ECHO_PORT),
+        )
+        .await
+        .expect("Connection timed out")
+        .expect("Failed to connect through shoes-lite REALITY server");
+
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let test_data = b"Hello from shoes-lite REALITY server test!";
+        stream.write_all(test_data).await.unwrap();
+        stream.flush().await.unwrap();
+
+        let mut buf = vec![0u8; test_data.len()];
+        stream.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, test_data);
+
+        server_handle.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore] // Requires Docker: cd tests/docker && ./run-e2e.sh
+    async fn test_e2e_speed_limit() {
+        let uuid = E2E_UUID_VISION;
+        // 32 KB/s speed limit
+        let (server_port, pub_key, server_handle) =
+            start_shoes_reality_server(uuid, Some(32768.0)).await;
+
+        let config = VlessConfig {
+            uuid: uuid.to_string(),
+            server_addr: format!("127.0.0.1:{server_port}"),
+            server_name: E2E_SERVER_NAME.to_string(),
+            reality_public_key: pub_key,
+            reality_short_id: E2E_SHORT_ID.to_string(),
+            flow: Some("xtls-rprx-vision".to_string()),
+            address: None,
+            netmask: None,
+            dns: None,
+            mtu: None,
+            allowed_ips: None,
+        };
+
+        let mut stream = tokio::time::timeout(
+            Duration::from_secs(30),
+            connect_through_vless(&config, E2E_ECHO_HOST, E2E_ECHO_PORT),
+        )
+        .await
+        .expect("Connection timed out")
+        .expect("Failed to connect through speed-limited REALITY server");
+
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        // Send 64KB through a 32KB/s limited connection
+        let test_data: Vec<u8> = (0..65536).map(|i| (i % 256) as u8).collect();
+        let start = std::time::Instant::now();
+
+        stream.write_all(&test_data).await.unwrap();
+        stream.flush().await.unwrap();
+
+        let mut buf = vec![0u8; test_data.len()];
+        stream.read_exact(&mut buf).await.unwrap();
+
+        let elapsed = start.elapsed();
+
+        // Verify data integrity
+        assert_eq!(buf, test_data);
+
+        // With 32KB/s combined limit, 64KB each way = 128KB total through the
+        // shared token bucket. Should take at least 1 second.
+        assert!(
+            elapsed >= Duration::from_secs(1),
+            "Transfer too fast ({elapsed:?}), speed limiting may not be working",
+        );
+
+        assert!(
+            elapsed <= Duration::from_secs(15),
+            "Transfer too slow ({elapsed:?}), possible deadlock",
+        );
+
+        server_handle.abort();
+    }
 }

@@ -23,6 +23,7 @@ use super::vless_util::{
     COMMAND_TCP, COMMAND_UDP, XTLS_VISION_FLOW, parse_addons_from_reader,
     parse_remote_location_from_reader,
 };
+use crate::speed_limit::LimitedStream;
 
 pub struct VlessTcpServerHandler {
     user_id: Box<[u8]>,
@@ -318,9 +319,16 @@ where
                 Box::new(tls_stream)
             };
 
+            let stream: Box<dyn AsyncStream> =
+                if let Some(limiter) = authenticator.get_limiter(&user_uuid) {
+                    Box::new(LimitedStream::new(flow_stream, limiter))
+                } else {
+                    flow_stream
+                };
+
             Ok(TcpServerSetupResult::TcpForward {
                 remote_location,
-                stream: flow_stream,
+                stream,
                 need_initial_flush: false,
                 connection_success_response: None, // VisionStream will send VLESS response with first write
                 initial_remote_data: None,         // Data fed to VisionStream instead

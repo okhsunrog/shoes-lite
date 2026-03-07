@@ -16,6 +16,12 @@ pub fn pad_with_command(data: &[u8], command: u8, is_tls: bool) -> Bytes {
 }
 
 fn pad(data: &[u8], uuid: Option<&[u8; 16]>, command: u8, is_tls: bool) -> Bytes {
+    debug_assert!(
+        data.len() <= u16::MAX as usize,
+        "Vision pad data too large: {} > {}",
+        data.len(),
+        u16::MAX
+    );
     let content_len = data.len() as u16;
     let padding_len = calculate_padding_length(content_len as usize, is_tls);
 

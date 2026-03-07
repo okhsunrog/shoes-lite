@@ -1138,7 +1138,18 @@ where
         }
 
         // Feed write buffer to inner deframer and check for ApplicationData
+        // Limit total deframer data to u16::MAX to prevent overflow in Vision pad
+        // length field (content_len is u16). The deframer can produce UnknownPrefix
+        // chunks that span the full accumulated buffer, so we must cap input.
         let existing_inner_len = self.inner_write_deframer.pending_bytes();
+        let max_feed = (u16::MAX as usize).saturating_sub(existing_inner_len);
+        let buf = &buf[..buf.len().min(max_feed)];
+        if buf.is_empty() {
+            // Deframer already has u16::MAX bytes pending but hasn't produced a chunk yet.
+            // This shouldn't happen in practice, return WouldBlock to retry.
+            cx.waker().wake_by_ref();
+            return Poll::Pending;
+        }
         self.inner_write_deframer.feed(buf);
 
         // Process all complete TLS records in the buffer
