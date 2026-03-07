@@ -831,13 +831,13 @@ mod tests {
         server_handle.abort();
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[ignore] // Requires Docker: cd tests/docker && ./run-e2e.sh
-    async fn test_e2e_speed_limit() {
+    /// Helper: run a speed-limited echo test.
+    /// `speed_bps` — limiter rate in bytes/sec.
+    /// `data_size` — payload size in bytes (sent and echoed back).
+    async fn run_speed_limit_test(speed_bps: f64, data_size: usize) {
         let uuid = E2E_UUID_VISION;
-        // 32 KB/s speed limit
         let (server_port, pub_key, server_handle) =
-            start_shoes_reality_server(uuid, Some(32768.0)).await;
+            start_shoes_reality_server(uuid, Some(speed_bps)).await;
 
         let config = VlessConfig {
             uuid: uuid.to_string(),
@@ -863,33 +863,75 @@ mod tests {
 
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-        // Send 64KB through a 32KB/s limited connection
-        let test_data: Vec<u8> = (0..65536).map(|i| (i % 256) as u8).collect();
+        let test_data: Vec<u8> = (0..data_size).map(|i| (i % 256) as u8).collect();
         let start = std::time::Instant::now();
 
         stream.write_all(&test_data).await.unwrap();
         stream.flush().await.unwrap();
 
-        let mut buf = vec![0u8; test_data.len()];
+        let mut buf = vec![0u8; data_size];
         stream.read_exact(&mut buf).await.unwrap();
 
         let elapsed = start.elapsed();
+        assert_eq!(buf, test_data, "Data integrity check failed");
 
-        // Verify data integrity
-        assert_eq!(buf, test_data);
-
-        // With 32KB/s combined limit, 64KB each way = 128KB total through the
-        // shared token bucket. Should take at least 1 second.
+        // Total bytes through limiter = data_size * 2 (send + receive).
+        // Expected minimum time ≈ total / speed_bps. Use 0.5x for tolerance.
+        let expected_secs = (data_size as f64 * 2.0) / speed_bps;
+        let min_secs = expected_secs * 0.5;
         assert!(
-            elapsed >= Duration::from_secs(1),
-            "Transfer too fast ({elapsed:?}), speed limiting may not be working",
+            elapsed.as_secs_f64() >= min_secs,
+            "Transfer too fast ({elapsed:?}), expected >= {min_secs:.1}s at {:.0} B/s with {data_size} bytes",
+            speed_bps,
         );
-
         assert!(
-            elapsed <= Duration::from_secs(15),
+            elapsed <= Duration::from_secs(30),
             "Transfer too slow ({elapsed:?}), possible deadlock",
         );
 
+        eprintln!(
+            "Speed limit test: {:.1} Mbps, {} KB payload, took {:.2}s (expected ~{:.2}s)",
+            speed_bps * 8.0 / 1_000_000.0,
+            data_size / 1024,
+            elapsed.as_secs_f64(),
+            expected_secs,
+        );
+
         server_handle.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore] // Requires Docker: cd tests/docker && ./run-e2e.sh
+    async fn test_e2e_speed_limit_32kbps() {
+        // 32 KB/s ≈ 0.25 Mbps, 64 KB payload
+        run_speed_limit_test(32_768.0, 65_536).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore] // Requires Docker: cd tests/docker && ./run-e2e.sh
+    async fn test_e2e_speed_limit_10mbps() {
+        // 10 Mbps = 1.25 MB/s, 2 MB payload
+        run_speed_limit_test(1_250_000.0, 2 * 1024 * 1024).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore] // Requires Docker: cd tests/docker && ./run-e2e.sh
+    async fn test_e2e_speed_limit_20mbps() {
+        // 20 Mbps = 2.5 MB/s, 4 MB payload
+        run_speed_limit_test(2_500_000.0, 4 * 1024 * 1024).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore] // Requires Docker: cd tests/docker && ./run-e2e.sh
+    async fn test_e2e_speed_limit_50mbps() {
+        // 50 Mbps = 6.25 MB/s, 10 MB payload
+        run_speed_limit_test(6_250_000.0, 10 * 1024 * 1024).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore] // Requires Docker: cd tests/docker && ./run-e2e.sh
+    async fn test_e2e_speed_limit_100mbps() {
+        // 100 Mbps = 12.5 MB/s, 20 MB payload
+        run_speed_limit_test(12_500_000.0, 20 * 1024 * 1024).await;
     }
 }
