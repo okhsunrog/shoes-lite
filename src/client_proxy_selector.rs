@@ -581,6 +581,7 @@ mod tests {
             }
         }
 
+        #[allow(dead_code)]
         fn with_mapping(mut self, hostname: &str, port: u16, addrs: Vec<IpAddr>) -> Self {
             let key = format!("{}:{}", hostname, port);
             let socket_addrs: Vec<SocketAddr> = addrs
@@ -2064,6 +2065,39 @@ mod tests {
         assert_ne!(
             mask.address_mask.netmask, 0,
             "172.17.0.0/24 should have netmask != 0"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_empty_masks_blocks_all() {
+        // Empty masks means the rule never matches — all connections are blocked.
+        // Use NetLocationMask::ANY to match everything.
+        let rule = ConnectRule::new(vec![], ConnectAction::new_allow(None, mock_chain_group()));
+        let selector = ClientProxySelector::new(vec![rule]);
+        let resolver = mock_resolver();
+        let location = ResolvedLocation::new(NetLocation::from_str("1.2.3.4:80", None).unwrap());
+
+        let decision = selector.judge(location, &resolver).await.unwrap();
+        assert!(
+            matches!(decision, ConnectDecision::Block),
+            "empty masks should block all connections"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_any_mask_allows_all() {
+        let rule = ConnectRule::new(
+            vec![NetLocationMask::ANY],
+            ConnectAction::new_allow(None, mock_chain_group()),
+        );
+        let selector = ClientProxySelector::new(vec![rule]);
+        let resolver = mock_resolver();
+        let location = ResolvedLocation::new(NetLocation::from_str("1.2.3.4:80", None).unwrap());
+
+        let decision = selector.judge(location, &resolver).await.unwrap();
+        assert!(
+            matches!(decision, ConnectDecision::Allow { .. }),
+            "NetLocationMask::ANY should allow all connections"
         );
     }
 }

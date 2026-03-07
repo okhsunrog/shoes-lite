@@ -608,6 +608,7 @@ mod tests {
     /// Mock SocketConnector that fails on connect (for unit testing structure).
     #[derive(Debug)]
     struct MockSocketConnector {
+        #[allow(dead_code)]
         id: usize,
     }
 

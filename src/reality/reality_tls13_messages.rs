@@ -356,11 +356,29 @@ pub fn construct_client_hello(
     }
 
     // signature_algorithms extension (type 13)
+    // Must include algorithms compatible with common server certificates (RSA, ECDSA)
+    // to ensure dest servers (e.g. www.microsoft.com) can complete the TLS handshake.
     {
+        #[rustfmt::skip]
+        let sig_algs: &[u8] = &[
+            0x04, 0x03, // ecdsa_secp256r1_sha256
+            0x05, 0x03, // ecdsa_secp384r1_sha384
+            0x08, 0x04, // rsa_pss_rsae_sha256
+            0x08, 0x05, // rsa_pss_rsae_sha384
+            0x08, 0x06, // rsa_pss_rsae_sha512
+            0x08, 0x07, // ed25519
+            0x08, 0x08, // ed448
+            0x04, 0x01, // rsa_pkcs1_sha256
+            0x05, 0x01, // rsa_pkcs1_sha384
+            0x06, 0x01, // rsa_pkcs1_sha512
+        ];
+        let sig_algs_list_len = sig_algs.len() as u16;
+        let ext_len = 2 + sig_algs_list_len;
+
         extensions.extend_from_slice(&[0x00, 0x0d]); // Extension type: signature_algorithms
-        extensions.extend_from_slice(&[0x00, 0x04]); // Extension length: 4
-        extensions.extend_from_slice(&[0x00, 0x02]); // Signature algorithms length: 2
-        extensions.extend_from_slice(&[0x08, 0x07]); // ed25519
+        extensions.extend_from_slice(&ext_len.to_be_bytes()); // Extension length
+        extensions.extend_from_slice(&sig_algs_list_len.to_be_bytes()); // Sig algs list length
+        extensions.extend_from_slice(sig_algs);
     }
 
     // ALPN extension (type 16)
