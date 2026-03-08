@@ -43,9 +43,12 @@ pub use platform::{SocketProtector, protect_socket, set_global_socket_protector}
 pub use tun_server::TunServerConfig;
 
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
 use log::{debug, info, warn};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
@@ -59,6 +62,64 @@ use crate::tcp::tcp_client_handler_factory::create_tcp_client_proxy_selector;
 
 use tcp_stack::TcpStack;
 use udp_manager::TunUdpManager;
+
+/// Wrapper that intercepts reads/writes to update traffic statistics per chunk.
+///
+/// Reads from the inner stream count as RX (data from remote), writes count as TX.
+struct StatsStream<S> {
+    inner: S,
+    stats: Arc<TunnelStats>,
+}
+
+impl<S> StatsStream<S> {
+    fn new(inner: S, stats: Arc<TunnelStats>) -> Self {
+        Self { inner, stats }
+    }
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for StatsStream<S> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        let before = buf.filled().len();
+        let result = Pin::new(&mut this.inner).poll_read(cx, buf);
+        if let Poll::Ready(Ok(())) = &result {
+            let bytes_read = buf.filled().len() - before;
+            if bytes_read > 0 {
+                this.stats.add_rx(bytes_read as u64);
+            }
+        }
+        result
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for StatsStream<S> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        let this = self.get_mut();
+        let result = Pin::new(&mut this.inner).poll_write(cx, buf);
+        if let Poll::Ready(Ok(n)) = &result {
+            if *n > 0 {
+                this.stats.add_tx(*n as u64);
+            }
+        }
+        result
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+    }
+}
 
 type PacketBuffer = Vec<u8>;
 
@@ -74,7 +135,7 @@ pub async fn run_tun_server(
     proxy_selector: Arc<ClientProxySelector>,
     resolver: Arc<dyn Resolver>,
     mut shutdown_rx: oneshot::Receiver<()>,
-    stats: Option<Arc<TunnelStats>>,
+    stats: Arc<TunnelStats>,
 ) -> std::io::Result<()> {
     info!(
         "Starting TUN server: mtu={}, tcp={}, udp={}, icmp={}",
@@ -199,7 +260,7 @@ async fn handle_tcp_connection(
     target: NetLocation,
     proxy_selector: Arc<ClientProxySelector>,
     resolver: Arc<dyn Resolver>,
-    stats: Option<Arc<TunnelStats>>,
+    stats: Arc<TunnelStats>,
 ) -> std::io::Result<()> {
     let decision = proxy_selector.judge(target.into(), &resolver).await?;
 
@@ -223,15 +284,11 @@ async fn handle_tcp_connection(
                         remote_location.location()
                     );
 
-                    let mut remote = setup_result.client_stream;
+                    let mut remote = StatsStream::new(setup_result.client_stream, stats);
                     let result = tokio::io::copy_bidirectional(&mut connection, &mut remote).await;
 
                     match result {
                         Ok((client_to_remote, remote_to_client)) => {
-                            if let Some(ref stats) = stats {
-                                stats.add_tx(client_to_remote);
-                                stats.add_rx(remote_to_client);
-                            }
                             debug!(
                                 "TCP connection to {} completed: {} bytes sent, {} bytes received",
                                 remote_location.location(),
@@ -269,7 +326,7 @@ async fn handle_udp_packets(
     to_stack_tx: mpsc::UnboundedSender<PacketBuffer>,
     proxy_selector: Arc<ClientProxySelector>,
     resolver: Arc<dyn Resolver>,
-    stats: Option<Arc<TunnelStats>>,
+    stats: Arc<TunnelStats>,
 ) {
     info!("Starting UDP handler (session-based)");
 
@@ -346,7 +403,7 @@ pub async fn run_tun_from_config(
         client_proxy_selector,
         resolver,
         shutdown_rx,
-        None,
+        Arc::new(TunnelStats::new()),
     )
     .await
 }

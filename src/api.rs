@@ -127,6 +127,8 @@ pub struct TunnelStats {
     tx_bytes: AtomicU64,
     rx_bytes: AtomicU64,
     connected_at: Instant,
+    /// Milliseconds elapsed since `connected_at` when the last RX data arrived.
+    last_rx_elapsed_ms: AtomicU64,
 }
 
 impl TunnelStats {
@@ -135,6 +137,7 @@ impl TunnelStats {
             tx_bytes: AtomicU64::new(0),
             rx_bytes: AtomicU64::new(0),
             connected_at: Instant::now(),
+            last_rx_elapsed_ms: AtomicU64::new(0),
         }
     }
 
@@ -144,6 +147,10 @@ impl TunnelStats {
 
     pub fn add_rx(&self, bytes: u64) {
         self.rx_bytes.fetch_add(bytes, Ordering::Relaxed);
+        if bytes > 0 {
+            let elapsed_ms = self.connected_at.elapsed().as_millis() as u64;
+            self.last_rx_elapsed_ms.store(elapsed_ms, Ordering::Relaxed);
+        }
     }
 
     pub fn snapshot(&self) -> TrafficStats {
@@ -151,6 +158,7 @@ impl TunnelStats {
             tx_bytes: self.tx_bytes.load(Ordering::Relaxed),
             rx_bytes: self.rx_bytes.load(Ordering::Relaxed),
             connected_at: self.connected_at,
+            last_rx_elapsed_ms: self.last_rx_elapsed_ms.load(Ordering::Relaxed),
         }
     }
 }
@@ -167,11 +175,23 @@ pub struct TrafficStats {
     pub tx_bytes: u64,
     pub rx_bytes: u64,
     pub connected_at: Instant,
+    last_rx_elapsed_ms: u64,
 }
 
 impl TrafficStats {
     pub fn duration(&self) -> Duration {
         self.connected_at.elapsed()
+    }
+
+    /// Time elapsed since the last packet was received.
+    ///
+    /// Returns `None` if no packet has been received yet.
+    pub fn time_since_last_packet_received(&self) -> Option<Duration> {
+        if self.last_rx_elapsed_ms == 0 {
+            return None;
+        }
+        let last_rx = Duration::from_millis(self.last_rx_elapsed_ms);
+        Some(self.connected_at.elapsed().saturating_sub(last_rx))
     }
 }
 
@@ -289,14 +309,9 @@ impl VlessTunnel {
 
         let stats_clone = stats.clone();
         let task_handle = tokio::spawn(async move {
-            if let Err(e) = crate::tun::run_tun_server(
-                tun_config,
-                selector,
-                resolver,
-                shutdown_rx,
-                Some(stats_clone),
-            )
-            .await
+            if let Err(e) =
+                crate::tun::run_tun_server(tun_config, selector, resolver, shutdown_rx, stats_clone)
+                    .await
             {
                 log::error!("TUN server error: {e}");
             }
@@ -317,6 +332,13 @@ impl VlessTunnel {
     /// Get connection duration.
     pub fn connection_duration(&self) -> Duration {
         self.stats.snapshot().duration()
+    }
+
+    /// Time elapsed since the last packet was received.
+    ///
+    /// Returns `None` if no packet has been received yet.
+    pub fn time_since_last_packet_received(&self) -> Option<Duration> {
+        self.stats.snapshot().time_since_last_packet_received()
     }
 
     /// Stop the tunnel gracefully.
