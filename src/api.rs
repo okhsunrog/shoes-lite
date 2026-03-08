@@ -195,6 +195,44 @@ impl TrafficStats {
     }
 }
 
+impl VlessConfig {
+    /// Verify VLESS+REALITY connectivity by making a test TCP connection
+    /// through the proxy chain directly (no TUN needed).
+    ///
+    /// Proves: server reachable -> REALITY handshake -> UUID accepted -> proxy
+    /// forwards traffic. Use this before or after tunnel creation to verify
+    /// the config works.
+    pub async fn check_connectivity(&self, timeout: Duration) -> Result<(), String> {
+        let resolver: Arc<dyn Resolver> = Arc::new(NativeResolver::new());
+        let selector = Arc::new(build_vless_selector(self, resolver.clone())?);
+
+        let target = NetLocation::from_str("1.1.1.1:443", None)
+            .map_err(|e| format!("Invalid target: {e}"))?;
+        let resolved: crate::address::ResolvedLocation = target.into();
+
+        let decision = selector
+            .judge(resolved, &resolver)
+            .await
+            .map_err(|e| format!("Selector error: {e}"))?;
+
+        match decision {
+            crate::client_proxy_selector::ConnectDecision::Allow {
+                chain_group,
+                remote_location,
+            } => {
+                tokio::time::timeout(timeout, chain_group.connect_tcp(remote_location, &resolver))
+                    .await
+                    .map_err(|_| "connectivity check timed out".to_string())?
+                    .map_err(|e| format!("connectivity check failed: {e}"))?;
+                Ok(())
+            }
+            crate::client_proxy_selector::ConnectDecision::Block => {
+                Err("Connection blocked by selector".to_string())
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Chain builder
 // ---------------------------------------------------------------------------
@@ -255,6 +293,8 @@ pub struct VlessTunnel {
     shutdown_tx: Option<oneshot::Sender<()>>,
     task_handle: JoinHandle<()>,
     stats: Arc<TunnelStats>,
+    selector: Arc<ClientProxySelector>,
+    resolver: Arc<dyn Resolver>,
 }
 
 impl VlessTunnel {
@@ -310,11 +350,18 @@ impl VlessTunnel {
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
+        let selector_clone = selector.clone();
+        let resolver_clone = resolver.clone();
         let stats_clone = stats.clone();
         let task_handle = tokio::spawn(async move {
-            if let Err(e) =
-                crate::tun::run_tun_server(tun_config, selector, resolver, shutdown_rx, stats_clone)
-                    .await
+            if let Err(e) = crate::tun::run_tun_server(
+                tun_config,
+                selector_clone,
+                resolver_clone,
+                shutdown_rx,
+                stats_clone,
+            )
+            .await
             {
                 log::error!("TUN server error: {e}");
             }
@@ -324,6 +371,8 @@ impl VlessTunnel {
             shutdown_tx: Some(shutdown_tx),
             task_handle,
             stats,
+            selector,
+            resolver,
         })
     }
 
@@ -342,6 +391,43 @@ impl VlessTunnel {
     /// Returns `None` if no packet has been received yet.
     pub fn time_since_last_packet_received(&self) -> Option<Duration> {
         self.stats.snapshot().time_since_last_packet_received()
+    }
+
+    /// Ping the VLESS server through the tunnel's own proxy chain (bypasses TUN).
+    ///
+    /// Makes a test TCP connection to 1.1.1.1:443 using the same
+    /// `ClientProxySelector` the running tunnel uses. On success, updates
+    /// `last_packet_received` so callers see fresh activity.
+    pub async fn ping(&self, timeout: Duration) -> Result<(), String> {
+        let target = NetLocation::from_str("1.1.1.1:443", None)
+            .map_err(|e| format!("Invalid target: {e}"))?;
+        let resolved: crate::address::ResolvedLocation = target.into();
+
+        let decision = self
+            .selector
+            .judge(resolved, &self.resolver)
+            .await
+            .map_err(|e| format!("Selector error: {e}"))?;
+
+        match decision {
+            crate::client_proxy_selector::ConnectDecision::Allow {
+                chain_group,
+                remote_location,
+            } => {
+                tokio::time::timeout(
+                    timeout,
+                    chain_group.connect_tcp(remote_location, &self.resolver),
+                )
+                .await
+                .map_err(|_| "ping timed out".to_string())?
+                .map_err(|e| format!("ping failed: {e}"))?;
+                self.stats.add_rx(1);
+                Ok(())
+            }
+            crate::client_proxy_selector::ConnectDecision::Block => {
+                Err("Connection blocked by selector".to_string())
+            }
+        }
     }
 
     /// Stop the tunnel gracefully.
