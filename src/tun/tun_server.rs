@@ -90,6 +90,14 @@ pub struct TunServerConfig {
     /// - **Linux/Android**: Not used
     #[allow(dead_code)] // Used on iOS
     pub packet_information: bool,
+    /// Whether to configure the TUN device (address, routes, bring up).
+    /// Default: true
+    ///
+    /// Set to `false` when the caller manages the TUN device externally
+    /// (e.g., via a privileged helper that pre-creates a persistent TUN).
+    /// When `false`, the `tun` crate just opens the existing device without
+    /// requiring root/CAP_NET_ADMIN.
+    pub manage_device: bool,
 }
 
 impl Default for TunServerConfig {
@@ -118,6 +126,7 @@ impl Default for TunServerConfig {
             raw_fd: None,
             close_fd_on_drop: true,
             packet_information: false,
+            manage_device: true,
         }
     }
 }
@@ -188,6 +197,16 @@ impl TunServerConfig {
         self
     }
 
+    /// Set whether to configure the TUN device (address, bring up, etc.).
+    ///
+    /// When `false`, the `tun` crate just opens the existing named device
+    /// without requiring root/CAP_NET_ADMIN. The caller is responsible for
+    /// creating, configuring, and bringing up the TUN device.
+    pub fn manage_device(mut self, manage: bool) -> Self {
+        self.manage_device = manage;
+        self
+    }
+
     /// Enable or disable TCP connection handling.
     pub fn tcp_enabled(mut self, enabled: bool) -> Self {
         self.tcp_enabled = enabled;
@@ -229,9 +248,15 @@ impl TunServerConfig {
                 config.destination(dest);
             }
             config.platform_config(|p| {
-                p.ensure_root_privileges(true);
+                // When manage_device is true, the tun crate configures the device
+                // (address, netmask, bring up) which requires root/CAP_NET_ADMIN.
+                // When false, it just opens the existing device — works unprivileged
+                // for pre-created persistent TUN devices.
+                p.ensure_root_privileges(self.manage_device);
             });
-            config.up();
+            if self.manage_device {
+                config.up();
+            }
         }
 
         #[cfg(target_os = "windows")]

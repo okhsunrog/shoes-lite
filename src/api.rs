@@ -299,8 +299,11 @@ impl VlessTunnel {
         Self::start(config, tun_config).await
     }
 
-    /// Common startup logic.
-    async fn start(config: &VlessConfig, tun_config: TunServerConfig) -> Result<Self, String> {
+    /// Start tunnel with a custom `TunServerConfig`.
+    ///
+    /// Use this when you need fine-grained control over TUN device creation,
+    /// e.g., setting `manage_device(false)` for pre-created persistent devices.
+    pub async fn start(config: &VlessConfig, tun_config: TunServerConfig) -> Result<Self, String> {
         let resolver: Arc<dyn Resolver> = Arc::new(NativeResolver::new());
         let selector = Arc::new(build_vless_selector(config, resolver.clone())?);
         let stats = Arc::new(TunnelStats::new());
