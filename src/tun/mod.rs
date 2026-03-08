@@ -123,15 +123,14 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for StatsStream<S> {
 
 type PacketBuffer = Vec<u8>;
 
-/// Run the TUN server with the given configuration.
+/// Run the TUN server with a pre-created TUN device.
 ///
-/// This function:
-/// 1. Creates an async TUN device
-/// 2. Sets up the smoltcp-based TCP/IP stack in a tokio task
-/// 3. Handles TCP connections through the proxy chain
-/// 4. Handles UDP packets through tokio
-pub async fn run_tun_server(
+/// Use this when the caller needs the TUN device to exist before starting
+/// the server (e.g., to configure routes/DNS on Windows). The device must
+/// already be created via `TunServerConfig::create_async_device()`.
+pub async fn run_tun_server_with_device(
     config: TunServerConfig,
+    tun_device: tun::AsyncDevice,
     proxy_selector: Arc<ClientProxySelector>,
     resolver: Arc<dyn Resolver>,
     mut shutdown_rx: oneshot::Receiver<()>,
@@ -143,8 +142,6 @@ pub async fn run_tun_server(
     );
 
     let mtu = config.mtu as usize;
-    let tun_device = config.create_async_device()?;
-    info!("Created async TUN device");
 
     let mut tcp_stack = TcpStack::new();
 
@@ -243,6 +240,26 @@ pub async fn run_tun_server(
 
     info!("TUN server stopped");
     Ok(())
+}
+
+/// Run the TUN server with the given configuration.
+///
+/// This function:
+/// 1. Creates an async TUN device
+/// 2. Sets up the smoltcp-based TCP/IP stack in a tokio task
+/// 3. Handles TCP connections through the proxy chain
+/// 4. Handles UDP packets through tokio
+pub async fn run_tun_server(
+    config: TunServerConfig,
+    proxy_selector: Arc<ClientProxySelector>,
+    resolver: Arc<dyn Resolver>,
+    shutdown_rx: oneshot::Receiver<()>,
+    stats: Arc<TunnelStats>,
+) -> std::io::Result<()> {
+    let tun_device = config.create_async_device()?;
+    info!("Created async TUN device");
+    run_tun_server_with_device(config, tun_device, proxy_selector, resolver, shutdown_rx, stats)
+        .await
 }
 
 /// Convert a SocketAddr to a NetLocation.

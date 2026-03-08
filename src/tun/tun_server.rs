@@ -35,6 +35,8 @@
 //! ```
 
 use std::net::IpAddr;
+#[cfg(target_os = "windows")]
+use std::path::PathBuf;
 
 use log::info;
 use tun::{AsyncDevice, Configuration as TunConfiguration};
@@ -98,6 +100,17 @@ pub struct TunServerConfig {
     /// When `false`, the `tun` crate just opens the existing device without
     /// requiring root/CAP_NET_ADMIN.
     pub manage_device: bool,
+    /// Fixed GUID for the Wintun adapter (Windows only).
+    ///
+    /// Using a fixed GUID prevents Windows from showing "new network detected"
+    /// popups on every connection.
+    #[cfg(target_os = "windows")]
+    pub device_guid: Option<u128>,
+    /// Path to `wintun.dll` (Windows only).
+    ///
+    /// If not set, the `tun` crate searches the default DLL search path.
+    #[cfg(target_os = "windows")]
+    pub wintun_file: Option<PathBuf>,
 }
 
 impl Default for TunServerConfig {
@@ -127,6 +140,10 @@ impl Default for TunServerConfig {
             close_fd_on_drop: true,
             packet_information: false,
             manage_device: true,
+            #[cfg(target_os = "windows")]
+            device_guid: None,
+            #[cfg(target_os = "windows")]
+            wintun_file: None,
         }
     }
 }
@@ -207,6 +224,20 @@ impl TunServerConfig {
         self
     }
 
+    /// Set a fixed GUID for the Wintun adapter (Windows only).
+    #[cfg(target_os = "windows")]
+    pub fn device_guid(mut self, guid: u128) -> Self {
+        self.device_guid = Some(guid);
+        self
+    }
+
+    /// Set the path to `wintun.dll` (Windows only).
+    #[cfg(target_os = "windows")]
+    pub fn wintun_file(mut self, path: impl Into<PathBuf>) -> Self {
+        self.wintun_file = Some(path.into());
+        self
+    }
+
     /// Enable or disable TCP connection handling.
     pub fn tcp_enabled(mut self, enabled: bool) -> Self {
         self.tcp_enabled = enabled;
@@ -273,6 +304,16 @@ impl TunServerConfig {
             if let Some(dest) = self.destination {
                 config.destination(dest);
             }
+            let device_guid = self.device_guid;
+            let wintun_file = self.wintun_file.clone();
+            config.platform_config(|cfg| {
+                if let Some(guid) = device_guid {
+                    cfg.device_guid(guid);
+                }
+                if let Some(ref path) = wintun_file {
+                    cfg.wintun_file(path);
+                }
+            });
             config.up();
         }
 

@@ -343,10 +343,20 @@ impl VlessTunnel {
     ///
     /// Use this when you need fine-grained control over TUN device creation,
     /// e.g., setting `manage_device(false)` for pre-created persistent devices.
+    ///
+    /// The TUN device is created eagerly before spawning the background task,
+    /// so it is guaranteed to exist when this method returns. This allows the
+    /// caller to configure routes/DNS on the interface immediately.
     pub async fn start(config: &VlessConfig, tun_config: TunServerConfig) -> Result<Self, String> {
         let resolver: Arc<dyn Resolver> = Arc::new(NativeResolver::new());
         let selector = Arc::new(build_vless_selector(config, resolver.clone())?);
         let stats = Arc::new(TunnelStats::new());
+
+        // Create TUN device eagerly so it exists before we return.
+        let tun_device = tun_config
+            .create_async_device()
+            .map_err(|e| format!("Failed to create TUN device: {e}"))?;
+        log::info!("Created async TUN device");
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
@@ -354,8 +364,9 @@ impl VlessTunnel {
         let resolver_clone = resolver.clone();
         let stats_clone = stats.clone();
         let task_handle = tokio::spawn(async move {
-            if let Err(e) = crate::tun::run_tun_server(
+            if let Err(e) = crate::tun::run_tun_server_with_device(
                 tun_config,
+                tun_device,
                 selector_clone,
                 resolver_clone,
                 shutdown_rx,
