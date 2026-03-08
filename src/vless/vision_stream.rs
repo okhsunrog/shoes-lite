@@ -855,16 +855,12 @@ where
                     }
                     Ok(DeframeResult::UnknownPrefix(prefix)) => {
                         // Skip unknown prefix bytes (e.g., VLESS headers from proxy chain)
+                        // Note: this is normal for non-TLS traffic (HTTP, etc.) — the data
+                        // still flows through the main unpadded path to pending_read.
                         if prefix.is_empty() {
                             return Err(io::Error::other("FuzzyTlsDeframer returned empty prefix"));
                         }
-                        if prefix.len() > 512 {
-                            log::warn!(
-                                "VISION READ: Unusually large prefix discarded: {} bytes",
-                                prefix.len()
-                            );
-                        }
-                        log::debug!("VISION READ: Skipped {} byte prefix", prefix.len());
+                        log::debug!("VISION READ: Skipped {} byte non-TLS prefix", prefix.len());
 
                         // Decrement once for this chunk
                         self.filter.decrement_filter_count();
