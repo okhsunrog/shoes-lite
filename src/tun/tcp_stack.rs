@@ -253,6 +253,11 @@ impl TcpStack {
         self.new_conn_rx.take()
     }
 
+    /// Get a clone of the running flag for external shutdown signaling.
+    pub fn running_flag(&self) -> Arc<AtomicBool> {
+        self.running.clone()
+    }
+
     /// Run the async smoltcp stack.
     ///
     /// This is the main loop that reads packets from the TUN device,

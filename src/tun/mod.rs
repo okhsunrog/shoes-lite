@@ -156,6 +156,9 @@ pub async fn run_tun_server_with_device(
         .take_new_conn_rx()
         .expect("new_conn_rx already taken");
 
+    // Keep a handle to the stack's running flag so we can signal it to stop
+    let stack_running = tcp_stack.running_flag();
+
     // Spawn the smoltcp stack task
     let stack_task: JoinHandle<()> = tokio::spawn(async move {
         tcp_stack.run(tun_device, mtu, udp_to_stack_rx).await;
@@ -222,20 +225,29 @@ pub async fn run_tun_server_with_device(
     info!("TUN server started successfully");
 
     // Wait for shutdown signal or stack task exit
+    let mut stack_task = stack_task;
     tokio::select! {
         _ = &mut shutdown_rx => {
             info!("TUN server shutdown requested");
         }
-        _ = stack_task => {
+        _ = &mut stack_task => {
             warn!("Stack task ended unexpectedly");
         }
     }
 
+    // Signal the stack to exit its main loop, then abort and await all tasks
+    // to ensure the TUN device (and Wintun session on Windows) is fully released.
+    stack_running.store(false, std::sync::atomic::Ordering::Relaxed);
+    stack_task.abort();
+    let _ = stack_task.await;
+
     if let Some(t) = tcp_task {
         t.abort();
+        let _ = t.await;
     }
     if let Some(t) = udp_task {
         t.abort();
+        let _ = t.await;
     }
 
     info!("TUN server stopped");
