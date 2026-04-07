@@ -16,7 +16,7 @@ use tokio::net::UdpSocket;
 use crate::address::{NetLocation, ResolvedLocation};
 use crate::async_stream::AsyncStream;
 use crate::config::{ClientConfig, Transport};
-use crate::resolver::{Resolver, resolve_location, resolve_single_address};
+use crate::resolver::{Resolver, resolve_addresses, resolve_location, resolve_single_address};
 use crate::socket_util::{new_tcp_socket, new_udp_socket, set_tcp_keepalive};
 
 use super::socket_connector::SocketConnector;
@@ -102,30 +102,48 @@ impl SocketConnector for SocketConnectorImpl {
         resolver: &Arc<dyn Resolver>,
         address: &ResolvedLocation,
     ) -> std::io::Result<Box<dyn AsyncStream>> {
-        let target_addr = match address.resolved_addr() {
-            Some(r) => r,
-            None => resolve_single_address(resolver, address.location()).await?,
+        let target_addrs = match address.resolved_addr() {
+            Some(r) => vec![r],
+            None => resolve_addresses(resolver, address.location()).await?,
         };
 
         match &self.transport {
             TransportConfig::Tcp { no_delay } => {
-                let tcp_socket =
-                    new_tcp_socket(self.bind_interface.clone(), target_addr.is_ipv6())?;
-                let stream = tcp_socket.connect(target_addr).await?;
-
-                if let Err(e) = set_tcp_keepalive(
-                    &stream,
-                    std::time::Duration::from_secs(120),
-                    std::time::Duration::from_secs(30),
-                ) {
-                    error!("Failed to set TCP keepalive: {e}");
+                let mut last_err = None;
+                for (i, target_addr) in target_addrs.iter().enumerate() {
+                    let tcp_socket =
+                        new_tcp_socket(self.bind_interface.clone(), target_addr.is_ipv6())?;
+                    match tcp_socket.connect(*target_addr).await {
+                        Ok(stream) => {
+                            if i > 0 {
+                                debug!(
+                                    "TCP connect succeeded on address #{} ({}) after {} failures",
+                                    i, target_addr, i
+                                );
+                            }
+                            if let Err(e) = set_tcp_keepalive(
+                                &stream,
+                                std::time::Duration::from_secs(120),
+                                std::time::Duration::from_secs(30),
+                            ) {
+                                error!("Failed to set TCP keepalive: {e}");
+                            }
+                            if *no_delay {
+                                if let Err(e) = stream.set_nodelay(true) {
+                                    error!("Failed to set TCP no-delay: {e}");
+                                }
+                            }
+                            return Ok(Box::new(stream));
+                        }
+                        Err(e) => {
+                            debug!("TCP connect to {} failed: {}, trying next", target_addr, e);
+                            last_err = Some(e);
+                        }
+                    }
                 }
-
-                if *no_delay && let Err(e) = stream.set_nodelay(true) {
-                    error!("Failed to set TCP no-delay: {e}");
-                }
-
-                Ok(Box::new(stream))
+                Err(last_err.unwrap_or_else(|| {
+                    std::io::Error::other("no resolved addresses succeeded")
+                }))
             }
         }
     }
