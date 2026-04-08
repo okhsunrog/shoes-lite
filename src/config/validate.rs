@@ -1917,6 +1917,8 @@ mod tests {
                 server_name: None,
                 ip_strategy: IpStrategy::default(),
                 timeout_secs: 10,
+                connect_timeout_secs: 5,
+                attempts: 1,
             }),
         })];
 
@@ -1956,6 +1958,8 @@ mod tests {
                     server_name: None,
                     ip_strategy: IpStrategy::default(),
                     timeout_secs: 10,
+                    connect_timeout_secs: 5,
+                    attempts: 1,
                 }),
             }),
         ];
@@ -1990,6 +1994,8 @@ mod tests {
                     server_name: None,
                     ip_strategy: IpStrategy::default(),
                     timeout_secs: 10,
+                    connect_timeout_secs: 5,
+                    attempts: 1,
                 }),
             }),
         ];
@@ -2024,6 +2030,8 @@ mod tests {
                     server_name: None,
                     ip_strategy: IpStrategy::default(),
                     timeout_secs: 10,
+                    connect_timeout_secs: 5,
+                    attempts: 1,
                 }),
             }),
         ];
@@ -2058,6 +2066,8 @@ mod tests {
                     server_name: None,
                     ip_strategy: IpStrategy::default(),
                     timeout_secs: 10,
+                    connect_timeout_secs: 5,
+                    attempts: 1,
                 }),
             }),
         ];
@@ -2085,6 +2095,8 @@ mod tests {
                     server_name: None,
                     ip_strategy: IpStrategy::default(),
                     timeout_secs: 10,
+                    connect_timeout_secs: 5,
+                    attempts: 1,
                 }),
             }),
         ];
@@ -2113,6 +2125,8 @@ mod tests {
                     server_name: None,
                     ip_strategy: IpStrategy::default(),
                     timeout_secs: 10,
+                    connect_timeout_secs: 5,
+                    attempts: 1,
                 }),
             }),
         ];
@@ -2141,6 +2155,8 @@ mod tests {
                     server_name: None,
                     ip_strategy: IpStrategy::default(),
                     timeout_secs: 10,
+                    connect_timeout_secs: 5,
+                    attempts: 1,
                 }),
             }),
         ];
@@ -2273,6 +2289,8 @@ mod tests {
                         server_name: Some("dns.google".to_string()),      // SNI override
                         ip_strategy: IpStrategy::default(),
                         timeout_secs: 10,
+                        connect_timeout_secs: 5,
+                        attempts: 1,
                     },
                 ]),
             }),
