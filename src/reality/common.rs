@@ -79,7 +79,10 @@ pub const OUTGOING_BUFFER_LIMIT: usize = 64 * 1024;
 ///
 /// This is the zero-allocation version for use with in-place decryption.
 /// Handles optional zero padding (used by Xray-core and other implementations).
-#[inline]
+///
+/// Only used by tests via `strip_content_type` - the hot path uses
+/// `strip_content_type_with_padding`.
+#[cfg(test)]
 pub fn strip_content_type_slice(plaintext: &[u8]) -> io::Result<(u8, usize)> {
     if plaintext.is_empty() {
         return Err(Error::new(ErrorKind::InvalidData, "Empty plaintext"));
