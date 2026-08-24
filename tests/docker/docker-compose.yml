@@ -10,7 +10,7 @@ services:
       - -c
       - |
         apk add --no-cache openssl &&
-        openssl genpkey -algorithm ED25519 -out /etc/ssl/private/key.pem 2>/dev/null &&
+        openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out /etc/ssl/private/key.pem 2>/dev/null &&
         openssl req -new -x509 -key /etc/ssl/private/key.pem -out /etc/ssl/certs/cert.pem \
           -days 365 -subj '/CN=www.example.com' 2>/dev/null &&
         exec nginx -g 'daemon off;'

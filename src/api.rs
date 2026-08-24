@@ -713,13 +713,24 @@ mod tests {
 
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-        // Send 1MB of data
+        // Send 1MB of data, reading the echo back concurrently: with bounded
+        // connection buffers, write-all-then-read deadlocks on back-pressure.
         let test_data: Vec<u8> = (0..1_000_000).map(|i| (i % 256) as u8).collect();
-        stream.write_all(&test_data).await.unwrap();
-        stream.flush().await.unwrap();
-
-        let mut buf = vec![0u8; test_data.len()];
-        stream.read_exact(&mut buf).await.unwrap();
+        let (mut rd, mut wr) = tokio::io::split(stream);
+        let write_fut = async {
+            wr.write_all(&test_data).await.unwrap();
+            wr.flush().await.unwrap();
+        };
+        let read_fut = async {
+            let mut buf = vec![0u8; test_data.len()];
+            rd.read_exact(&mut buf).await.unwrap();
+            buf
+        };
+        let (_, buf) = tokio::time::timeout(Duration::from_secs(60), async {
+            tokio::join!(write_fut, read_fut)
+        })
+        .await
+        .expect("Echo transfer timed out (deadlock?)");
         assert_eq!(buf, test_data);
     }
 
@@ -988,11 +999,23 @@ mod tests {
         let test_data: Vec<u8> = (0..data_size).map(|i| (i % 256) as u8).collect();
         let start = std::time::Instant::now();
 
-        stream.write_all(&test_data).await.unwrap();
-        stream.flush().await.unwrap();
-
-        let mut buf = vec![0u8; data_size];
-        stream.read_exact(&mut buf).await.unwrap();
+        // Write and read concurrently: with bounded connection buffers, writing
+        // the whole payload before reading the echo back deadlocks on back-pressure.
+        let (mut rd, mut wr) = tokio::io::split(stream);
+        let write_fut = async {
+            wr.write_all(&test_data).await.unwrap();
+            wr.flush().await.unwrap();
+        };
+        let read_fut = async {
+            let mut buf = vec![0u8; data_size];
+            rd.read_exact(&mut buf).await.unwrap();
+            buf
+        };
+        let (_, buf) = tokio::time::timeout(Duration::from_secs(60), async {
+            tokio::join!(write_fut, read_fut)
+        })
+        .await
+        .expect("Echo transfer timed out (deadlock?)");
 
         let elapsed = start.elapsed();
         assert_eq!(buf, test_data, "Data integrity check failed");
