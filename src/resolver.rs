@@ -260,69 +260,6 @@ impl Resolver for RefreshingResolver {
     }
 }
 
-/// Short-TTL shared cache above the inner resolver. Placed outside
-/// RefreshingResolver so a refresh does not destroy cached results.
-/// Caches full Vec<SocketAddr> results, preserving all addresses.
-pub struct SharedCachingResolver {
-    inner: Arc<dyn Resolver>,
-    ttl: Duration,
-    cache: Arc<Mutex<FxHashMap<NetLocation, CachedAddrs>>>,
-}
-
-struct CachedAddrs {
-    timestamp: Instant,
-    addrs: Vec<SocketAddr>,
-}
-
-impl Debug for SharedCachingResolver {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SharedCachingResolver")
-            .field("ttl", &self.ttl)
-            .finish()
-    }
-}
-
-impl SharedCachingResolver {
-    pub fn new(inner: Arc<dyn Resolver>, ttl: Duration) -> Self {
-        Self {
-            inner,
-            ttl,
-            cache: Arc::new(Mutex::new(FxHashMap::default())),
-        }
-    }
-}
-
-impl Resolver for SharedCachingResolver {
-    fn resolve_location(&self, location: &NetLocation) -> ResolveFuture {
-        if let Some(socket_addr) = location.to_socket_addr_nonblocking() {
-            return Box::pin(async move { Ok(vec![socket_addr]) });
-        }
-
-        if let Some(entry) = self.cache.lock().get(location) {
-            if entry.timestamp.elapsed() <= self.ttl {
-                let addrs = entry.addrs.clone();
-                return Box::pin(async move { Ok(addrs) });
-            }
-        }
-
-        let location = location.clone();
-        let inner = self.inner.clone();
-        let cache = self.cache.clone();
-
-        Box::pin(async move {
-            let addrs = inner.resolve_location(&location).await?;
-            cache.lock().insert(
-                location,
-                CachedAddrs {
-                    timestamp: Instant::now(),
-                    addrs: addrs.clone(),
-                },
-            );
-            Ok(addrs)
-        })
-    }
-}
-
 #[derive(Debug, Default)]
 pub struct NativeResolver;
 
@@ -630,10 +567,6 @@ mod tests {
                 error_kind: Some(kind),
             }
         }
-
-        fn count(&self) -> usize {
-            self.call_count.load(Ordering::Relaxed)
-        }
     }
 
     impl Resolver for MockResolver {
@@ -648,44 +581,6 @@ mod tests {
                     Ok(addrs)
                 }
             })
-        }
-    }
-
-    /// A mock resolver that fails the first N calls then succeeds.
-    #[derive(Debug)]
-    struct FlakyResolver {
-        fail_count: AtomicUsize,
-        fails_remaining: AtomicUsize,
-        error_kind: std::io::ErrorKind,
-        success_addrs: Vec<SocketAddr>,
-    }
-
-    impl FlakyResolver {
-        fn new(
-            fail_first_n: usize,
-            error_kind: std::io::ErrorKind,
-            success_addrs: Vec<SocketAddr>,
-        ) -> Self {
-            Self {
-                fail_count: AtomicUsize::new(0),
-                fails_remaining: AtomicUsize::new(fail_first_n),
-                error_kind,
-                success_addrs,
-            }
-        }
-    }
-
-    impl Resolver for FlakyResolver {
-        fn resolve_location(&self, _location: &NetLocation) -> ResolveFuture {
-            let remaining = self.fails_remaining.fetch_sub(1, Ordering::Relaxed);
-            if remaining > 0 {
-                self.fail_count.fetch_add(1, Ordering::Relaxed);
-                let kind = self.error_kind;
-                Box::pin(async move { Err(std::io::Error::new(kind, "flaky error")) })
-            } else {
-                let addrs = self.success_addrs.clone();
-                Box::pin(async move { Ok(addrs) })
-            }
         }
     }
 
@@ -910,46 +805,6 @@ mod tests {
         assert_eq!(result, addrs);
         // Factory called twice: initial + idle refresh
         assert_eq!(call_count.load(Ordering::Relaxed), 2);
-    }
-
-    #[tokio::test]
-    async fn test_shared_caching_resolver_caches_results() {
-        let inner = Arc::new(MockResolver::with_addrs(test_addrs()));
-        let resolver = SharedCachingResolver::new(inner.clone(), Duration::from_secs(60));
-
-        let loc = test_location();
-
-        // First call hits the inner resolver
-        let result1 = resolver.resolve_location(&loc).await.unwrap();
-        assert_eq!(result1, test_addrs());
-        assert_eq!(inner.count(), 1);
-
-        // Second call hits the cache
-        let result2 = resolver.resolve_location(&loc).await.unwrap();
-        assert_eq!(result2, test_addrs());
-        assert_eq!(inner.count(), 1); // Still 1, cache hit
-
-        // IP literals bypass cache
-        let ip_loc = NetLocation::new(Address::Ipv4("1.2.3.4".parse().unwrap()), 80);
-        let result3 = resolver.resolve_location(&ip_loc).await.unwrap();
-        assert_eq!(result3[0], "1.2.3.4:80".parse::<SocketAddr>().unwrap());
-        assert_eq!(inner.count(), 1); // Still 1, IP bypass
-    }
-
-    #[tokio::test]
-    async fn test_shared_caching_resolver_expires() {
-        let inner = Arc::new(MockResolver::with_addrs(test_addrs()));
-        let resolver = SharedCachingResolver::new(inner.clone(), Duration::from_millis(50));
-
-        let loc = test_location();
-
-        resolver.resolve_location(&loc).await.unwrap();
-        assert_eq!(inner.count(), 1);
-
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
-        resolver.resolve_location(&loc).await.unwrap();
-        assert_eq!(inner.count(), 2); // Cache expired, hit inner again
     }
 
     #[tokio::test]
