@@ -1,6 +1,6 @@
 [package]
 name = "shoes-lite"
-version = "0.2.8"
+version = "0.1.0"
 edition = "2024"
 license = "MIT"
 description = "A minimal VLESS+REALITY client library with TUN support."
