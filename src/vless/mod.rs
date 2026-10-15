@@ -3,7 +3,10 @@
 pub mod vless_client_handler;
 pub mod vless_server_handler;
 
-pub mod tls_deframer;
+// Compatibility path: TLS record ownership now lives in the crypto layer.
+#[allow(unused_imports)]
+// Public compatibility export, also compiled by the standalone binary.
+pub use crate::crypto::tls_deframer;
 mod tls_fuzzy_deframer;
 mod tls_handshake_util;
 mod vision_filter;

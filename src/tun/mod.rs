@@ -160,9 +160,8 @@ pub async fn run_tun_server_with_device(
     let stack_running = tcp_stack.running_flag();
 
     // Spawn the smoltcp stack task
-    let stack_task: JoinHandle<()> = tokio::spawn(async move {
-        tcp_stack.run(tun_device, mtu, udp_to_stack_rx).await;
-    });
+    let stack_task: JoinHandle<std::io::Result<()>> =
+        tokio::spawn(async move { tcp_stack.run(tun_device, mtu, udp_to_stack_rx).await });
 
     let tcp_task: Option<JoinHandle<()>> = if config.tcp_enabled {
         let proxy_selector = proxy_selector.clone();
@@ -172,12 +171,17 @@ pub async fn run_tun_server_with_device(
         Some(tokio::spawn(async move {
             info!("Starting TCP connection handler");
 
-            while let Some(new_conn) = tcp_conn_rx.recv().await {
+            let mut connections = tokio::task::JoinSet::new();
+            loop {
+                let new_conn = tokio::select! {
+                    next = tcp_conn_rx.recv() => match next { Some(next) => next, None => break },
+                    _ = connections.join_next(), if !connections.is_empty() => continue,
+                };
                 let proxy_selector = proxy_selector.clone();
                 let resolver = resolver.clone();
                 let stats = stats.clone();
 
-                tokio::spawn(async move {
+                connections.spawn(async move {
                     let remote_addr = new_conn.remote_addr;
                     let target = socket_addr_to_net_location(remote_addr);
 
@@ -226,20 +230,30 @@ pub async fn run_tun_server_with_device(
 
     // Wait for shutdown signal or stack task exit
     let mut stack_task = stack_task;
-    tokio::select! {
+    let result = tokio::select! {
         _ = &mut shutdown_rx => {
             info!("TUN server shutdown requested");
+            None
         }
-        _ = &mut stack_task => {
-            warn!("Stack task ended unexpectedly");
-        }
-    }
+        result = &mut stack_task => Some(result),
+    };
+    let stack_finished = result.is_some();
+    let result = match result {
+        None => Ok(()),
+        Some(Ok(Err(error))) => Err(error),
+        Some(Ok(Ok(()))) => Err(std::io::Error::other("TUN stack stopped unexpectedly")),
+        Some(Err(error)) => Err(std::io::Error::other(format!(
+            "TUN stack task failed: {error}"
+        ))),
+    };
 
     // Signal the stack to exit its main loop, then abort and await all tasks
     // to ensure the TUN device (and Wintun session on Windows) is fully released.
     stack_running.store(false, std::sync::atomic::Ordering::Relaxed);
-    stack_task.abort();
-    let _ = stack_task.await;
+    if !stack_finished {
+        stack_task.abort();
+        let _ = stack_task.await;
+    }
 
     if let Some(t) = tcp_task {
         t.abort();
@@ -251,7 +265,7 @@ pub async fn run_tun_server_with_device(
     }
 
     info!("TUN server stopped");
-    Ok(())
+    result
 }
 
 /// Run the TUN server with the given configuration.
@@ -270,8 +284,15 @@ pub async fn run_tun_server(
 ) -> std::io::Result<()> {
     let tun_device = config.create_async_device()?;
     info!("Created async TUN device");
-    run_tun_server_with_device(config, tun_device, proxy_selector, resolver, shutdown_rx, stats)
-        .await
+    run_tun_server_with_device(
+        config,
+        tun_device,
+        proxy_selector,
+        resolver,
+        shutdown_rx,
+        stats,
+    )
+    .await
 }
 
 /// Convert a SocketAddr to a NetLocation.

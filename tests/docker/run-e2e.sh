@@ -8,14 +8,17 @@ cd "$SCRIPT_DIR"
 
 echo "Starting Docker services..."
 docker compose up -d
+trap 'docker compose down' EXIT
 
 echo "Waiting for Xray server to be ready..."
-for i in $(seq 1 30); do
-    if nc -z 127.0.0.1 10443 2>/dev/null; then
-        echo "Xray server is ready."
+for i in $(seq 1 120); do
+    if nc -z 127.0.0.1 10443 2>/dev/null &&
+       nc -z 127.0.0.1 19443 2>/dev/null &&
+       nc -z 127.0.0.1 18080 2>/dev/null; then
+        echo "Xray, TLS destination and echo server are ready."
         break
     fi
-    if [ "$i" -eq 30 ]; then
+    if [ "$i" -eq 120 ]; then
         echo "Timed out waiting for Xray server."
         docker compose logs
         docker compose down
@@ -23,9 +26,6 @@ for i in $(seq 1 30); do
     fi
     sleep 1
 done
-
-# Give echo server a moment to install socat and start
-sleep 2
 
 echo "Running e2e tests..."
 cd "$PROJECT_DIR"

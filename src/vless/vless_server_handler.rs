@@ -4,7 +4,6 @@ use async_trait::async_trait;
 use log::debug;
 use subtle::ConstantTimeEq;
 use tokio::io::AsyncWriteExt;
-use tokio::net::TcpStream;
 
 use crate::address::NetLocation;
 use crate::async_stream::AsyncStream;
@@ -85,7 +84,8 @@ async fn vless_fallback_to_dest<S: AsyncStream + 'static>(
 
     debug!("VLESS FALLBACK: Resolved {} to {}", fallback, dest_addr);
 
-    let mut dest_stream: Box<dyn AsyncStream> = Box::new(TcpStream::connect(dest_addr).await?);
+    let socket = crate::socket_util::new_tcp_socket(None, dest_addr.is_ipv6())?;
+    let mut dest_stream: Box<dyn AsyncStream> = Box::new(socket.connect(dest_addr).await?);
 
     debug!(
         "VLESS FALLBACK: Connected to fallback, forwarding {} bytes",
@@ -99,10 +99,8 @@ async fn vless_fallback_to_dest<S: AsyncStream + 'static>(
 
     debug!("VLESS FALLBACK: Spawning bidirectional copy");
 
-    // Spawn the long-running bidirectional copy as a background task.
-    // This allows the setup to complete within the timeout while the actual
-    // data transfer runs indefinitely.
-    tokio::spawn(async move {
+    // Return the transfer to the caller so cancellation owns the entire connection.
+    Ok(TcpServerSetupResult::Session(Box::pin(async move {
         let mut client_stream = client_stream;
         let result = crate::copy_bidirectional::copy_bidirectional(
             &mut client_stream,
@@ -112,17 +110,17 @@ async fn vless_fallback_to_dest<S: AsyncStream + 'static>(
         )
         .await;
 
-        let _ = client_stream.shutdown().await;
-        let _ = dest_stream.shutdown().await;
+        futures::join!(
+            crate::util::shutdown_stream(&mut client_stream),
+            crate::util::shutdown_stream(&mut dest_stream),
+        );
 
         if let Err(e) = result {
             debug!("VLESS FALLBACK: Connection ended: {}", e);
         } else {
             debug!("VLESS FALLBACK: Connection completed");
         }
-    });
-
-    Ok(TcpServerSetupResult::AlreadyHandled)
+    })))
 }
 
 #[async_trait]
@@ -250,6 +248,7 @@ pub async fn setup_custom_tls_vision_vless_server_stream<IO>(
 where
     IO: AsyncStream + 'static,
 {
+    tls_stream.require_record_framing()?;
     let mut stream_reader = StreamReader::new_with_buffer_size(800);
 
     let client_version = stream_reader.peek_u8(&mut tls_stream).await?;
@@ -259,6 +258,7 @@ where
             client_version
         );
         if let Some(ref fb) = fallback {
+            tls_stream.allow_streaming_reads();
             return vless_fallback_to_dest(tls_stream, stream_reader, fb, resolver).await;
         }
         return Err(std::io::Error::other(format!(
@@ -276,6 +276,7 @@ where
     if !authenticator.authenticate(&user_uuid) {
         debug!("VLESS/Vision UUID mismatch");
         if let Some(ref fb) = fallback {
+            tls_stream.allow_streaming_reads();
             return vless_fallback_to_dest(tls_stream, stream_reader, fb, resolver).await;
         }
         return Err(std::io::Error::other("Unknown user id"));
@@ -305,19 +306,12 @@ where
             debug!("Remote location parsed: {}", remote_location);
             let unparsed_data = stream_reader.unparsed_data();
 
-            let flow_stream: Box<dyn AsyncStream> = if flow == XTLS_VISION_FLOW {
-                debug!("Creating VISION stream (Custom TLS) for flow: {}", flow);
-                let (io, session) = tls_stream.into_inner();
-
-                Box::new(VisionStream::new_server(
-                    io,
-                    session,
-                    user_uuid,
-                    unparsed_data,
-                )?)
-            } else {
-                Box::new(tls_stream)
-            };
+            debug!("Creating VISION stream (Custom TLS) for flow: {}", flow);
+            let flow_stream: Box<dyn AsyncStream> = Box::new(VisionStream::new_server(
+                tls_stream,
+                user_uuid,
+                unparsed_data,
+            )?);
 
             let stream: Box<dyn AsyncStream> =
                 if let Some(limiter) = authenticator.get_limiter(&user_uuid) {
@@ -349,6 +343,7 @@ where
             debug!("Remote location parsed: {}", remote_location);
             let unparsed_data = stream_reader.unparsed_data();
 
+            tls_stream.allow_streaming_reads();
             write_all(&mut tls_stream, SERVER_RESPONSE_HEADER).await?;
             let mut vless_stream = VlessMessageStream::new(tls_stream);
             if !unparsed_data.is_empty() {

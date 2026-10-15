@@ -5,7 +5,7 @@
 
 use std::{
     collections::HashMap,
-    mem,
+    io, mem,
     net::SocketAddr,
     ops::{Deref, DerefMut},
     sync::{
@@ -30,7 +30,7 @@ use smoltcp::{
         Ipv6Packet, TcpPacket,
     },
 };
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{Notify, mpsc};
 use tun::AsyncDevice;
 
@@ -96,6 +96,12 @@ struct SocketInfo {
     control: Arc<TcpConnectionControl>,
     src_addr: SocketAddr,
     dst_addr: SocketAddr,
+}
+
+impl Drop for SocketInfo {
+    fn drop(&mut self) {
+        self.control.set_closed();
+    }
 }
 
 /// Information about a new TCP connection from the stack.
@@ -266,18 +272,28 @@ impl TcpStack {
         &self,
         tun_device: AsyncDevice,
         mtu: usize,
+        udp_response_rx: mpsc::UnboundedReceiver<PacketBuffer>,
+    ) -> io::Result<()> {
+        let (tun_writer, tun_reader) = tun_device.split()?;
+        self.run_io(tun_reader, tun_writer, mtu, udp_response_rx)
+            .await
+    }
+
+    async fn run_io<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
+        &self,
+        mut tun_reader: R,
+        mut tun_writer: W,
+        mtu: usize,
         mut udp_response_rx: mpsc::UnboundedReceiver<PacketBuffer>,
-    ) {
-        let (mut tun_writer, mut tun_reader) = tun_device
-            .split()
-            .map_err(|e| warn!("Failed to split TUN device: {}", e))
-            .expect("Failed to split TUN device");
+    ) -> io::Result<()> {
+        let started = tokio::time::Instant::now();
+        let now = || SmolInstant::from_micros(started.elapsed().as_micros() as i64);
         let mut device = QueueDevice::new(mtu);
 
         let mut iface_config = InterfaceConfig::new(HardwareAddress::Ip);
         iface_config.random_seed = rand::random();
 
-        let mut iface = Interface::new(iface_config, &mut device, SmolInstant::now());
+        let mut iface = Interface::new(iface_config, &mut device, now());
 
         iface.update_ip_addrs(|addrs| {
             if let Err(e) = addrs.push(IpCidr::new(IpAddress::v4(0, 0, 0, 1), 0)) {
@@ -315,96 +331,94 @@ impl TcpStack {
 
         info!("smoltcp async stack started, entering main loop");
 
-        while self.running.load(Ordering::Relaxed) {
-            // Calculate poll delay from smoltcp (capped at 10ms for responsiveness)
-            let poll_delay = {
-                let now = SmolInstant::now();
-                let delay = iface.poll_delay(now, &socket_set);
-                match delay {
-                    Some(d) => Duration::from_millis(d.total_millis().min(10)),
-                    None => Duration::from_millis(10),
-                }
-            };
+        let result = async {
+            while self.running.load(Ordering::Relaxed) {
+                // TCP timers supply deadlines; bridge writes/reads/close and TUN/UDP I/O wake us.
+                // With no sockets there is no polling timer at all.
+                let poll_delay = iface.poll_delay(now(), &socket_set).map(|d| Duration::from_micros(d.total_micros()));
+                let timer = async {
+                    match poll_delay {
+                        Some(delay) => tokio::time::sleep(delay).await,
+                        None => std::future::pending().await,
+                    }
+                };
+                tokio::select! {
+                    // Read packet from TUN device
+                    result = tun_reader.read(&mut read_buf) => {
+                        match result {
+                            Ok(n) if n > 0 => {
+                                let mut pkt = PooledBuffer::with_capacity(n);
+                                pkt.extend_from_slice(&read_buf[..n]);
 
-            tokio::select! {
-                // Read packet from TUN device
-                result = tun_reader.read(&mut read_buf) => {
-                    match result {
-                        Ok(n) if n > 0 => {
-                            let mut pkt = PooledBuffer::with_capacity(n);
-                            pkt.extend_from_slice(&read_buf[..n]);
-
-                            if !should_filter_packet(&pkt) {
-                                self.process_incoming_packet(
-                                    pkt,
-                                    &mut device,
-                                    &mut iface,
-                                    &mut socket_set,
-                                    &mut sockets,
-                                    &mut active_connections,
-                                );
+                                if !should_filter_packet(&pkt) {
+                                    self.process_incoming_packet(
+                                        pkt,
+                                        &mut device,
+                                        &mut socket_set,
+                                        &mut sockets,
+                                        &mut active_connections,
+                                    );
+                                }
+                            }
+                            Ok(_) => {
+                                // EOF
+                                error!("TUN device closed (EOF)");
+                                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "TUN device closed"));
+                            }
+                            Err(e) => {
+                                error!("TUN device read error: {}", e);
+                                return Err(e);
                             }
                         }
-                        Ok(_) => {
-                            // EOF
-                            error!("TUN device closed (EOF)");
-                            break;
-                        }
-                        Err(e) => {
-                            error!("TUN device read error: {}", e);
-                            break;
-                        }
+                    }
+
+                    // Write UDP response back to TUN
+                    Some(pkt) = udp_response_rx.recv() => {
+                        write_packet(&mut tun_writer, &pkt).await?;
+                    }
+
+                    // Socket data ready (TcpConnection wrote data or closed)
+                    _ = self.notify.notified() => {
+                        // Just need to poll smoltcp below
+                    }
+
+                    // Periodic poll for retransmissions/keepalives
+                    _ = timer => {
+                        // Just need to poll smoltcp below
                     }
                 }
 
-                // Write UDP response back to TUN
-                Some(pkt) = udp_response_rx.recv() => {
-                    if let Err(e) = tun_writer.write_all(&pkt).await {
-                        warn!("Failed to write UDP response to TUN: {}", e);
-                    }
+                // Poll smoltcp and manage sockets
+                let current = now();
+                iface.poll(current, &mut device, &mut socket_set);
+
+                self.manage_sockets(&mut socket_set, &mut sockets, &mut active_connections);
+
+                // Poll again after data transfer (critical for performance)
+                let after_transfer = now();
+                iface.poll(after_transfer, &mut device, &mut socket_set);
+
+                // Flush TX queue to TUN
+                for pkt in device.drain_tx() {
+                    write_packet(&mut tun_writer, &pkt).await?;
                 }
 
-                // Socket data ready (TcpConnection wrote data or closed)
-                _ = self.notify.notified() => {
-                    // Just need to poll smoltcp below
-                }
-
-                // Periodic poll for retransmissions/keepalives
-                _ = tokio::time::sleep(poll_delay) => {
-                    // Just need to poll smoltcp below
-                }
-            }
-
-            // Poll smoltcp and manage sockets
-            let now = SmolInstant::now();
-            iface.poll(now, &mut device, &mut socket_set);
-
-            self.manage_sockets(&mut socket_set, &mut sockets, &mut active_connections);
-
-            // Poll again after data transfer (critical for performance)
-            let after_transfer = SmolInstant::now();
-            iface.poll(after_transfer, &mut device, &mut socket_set);
-
-            // Flush TX queue to TUN
-            for pkt in device.drain_tx() {
-                if let Err(e) = tun_writer.write_all(&pkt).await {
-                    warn!("Failed to write to TUN: {}", e);
+                poll_count += 1;
+                if last_log_time.elapsed() >= Duration::from_secs(30) {
+                    debug!(
+                        "smoltcp async stack: polls={}, active_sockets={}",
+                        poll_count,
+                        sockets.len()
+                    );
+                    last_log_time = std::time::Instant::now();
                 }
             }
 
-            poll_count += 1;
-            if last_log_time.elapsed() >= Duration::from_secs(30) {
-                debug!(
-                    "smoltcp async stack: polls={}, active_sockets={}",
-                    poll_count,
-                    sockets.len()
-                );
-                last_log_time = std::time::Instant::now();
-            }
-        }
-
+            Ok(())
+        }.await;
         self.running.store(false, Ordering::Relaxed);
         info!("smoltcp async stack stopped");
+        result
     }
 
     /// Process an incoming packet: classify and route to smoltcp or UDP handler.
@@ -412,7 +426,6 @@ impl TcpStack {
         &self,
         pkt: PooledBuffer,
         device: &mut QueueDevice,
-        iface: &mut Interface,
         socket_set: &mut SocketSet<'static>,
         sockets: &mut HashMap<SocketHandle, SocketInfo>,
         active_connections: &mut std::collections::HashSet<(SocketAddr, SocketAddr)>,
@@ -465,13 +478,9 @@ impl TcpStack {
 
                     // Feed to smoltcp for processing
                     device.enqueue_rx(pkt);
-                    let now = SmolInstant::now();
-                    iface.poll(now, device, socket_set);
                 }
                 IpProtocol::Icmp | IpProtocol::Icmpv6 => {
                     device.enqueue_rx(pkt);
-                    let now = SmolInstant::now();
-                    iface.poll(now, device, socket_set);
                 }
                 IpProtocol::Udp => {
                     let _ = self.udp_tx.send(pkt.to_vec());
@@ -503,20 +512,6 @@ impl TcpStack {
                 control.set_closed();
                 trace!("socket {:?} closed", handle);
                 continue;
-            }
-
-            // Handle SHUT_WR: Close -> Closing transition
-            if control.send_state() == TcpSocketState::Close
-                && socket.send_queue() == 0
-                && control.send_buffer_empty()
-            {
-                trace!(
-                    "socket {:?}: closing write half, state={:?}",
-                    handle,
-                    socket.state()
-                );
-                socket.close();
-                control.set_send_state(TcpSocketState::Closing);
             }
 
             // Receive data from smoltcp into our buffer
@@ -602,6 +597,19 @@ impl TcpStack {
 
             if wake_sender {
                 control.wake_sender();
+            }
+            // Handle SHUT_WR: Close -> Closing transition
+            if control.send_state() == TcpSocketState::Close
+                && socket.send_queue() == 0
+                && control.send_buffer_empty()
+            {
+                trace!(
+                    "socket {:?}: closing write half, state={:?}",
+                    handle,
+                    socket.state()
+                );
+                socket.close();
+                control.set_send_state(TcpSocketState::Closing);
             }
         }
 
@@ -785,3 +793,23 @@ fn should_filter_packet(packet: &[u8]) -> bool {
         _ => true,
     }
 }
+
+async fn write_packet<W: AsyncWrite + Unpin>(writer: &mut W, packet: &[u8]) -> io::Result<()> {
+    loop {
+        match writer.write(packet).await {
+            Ok(n) if n == packet.len() => return Ok(()),
+            Ok(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "short TUN packet write",
+                ));
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "stack_tests.rs"]
+mod stack_tests;

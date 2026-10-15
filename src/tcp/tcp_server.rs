@@ -274,6 +274,10 @@ where
             )
             .await
         }
+        TcpServerSetupResult::Session(session) => {
+            session.await;
+            Ok(())
+        }
         TcpServerSetupResult::AlreadyHandled => {
             // Connection is being handled by a spawned task (e.g., Reality fallback).
             // Nothing more to do here.

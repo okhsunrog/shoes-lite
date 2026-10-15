@@ -8,6 +8,8 @@ use crate::async_stream::{AsyncMessageStream, AsyncStream, AsyncTargetedMessageS
 use crate::client_proxy_selector::ClientProxySelector;
 
 pub enum TcpServerSetupResult {
+    /// Transfer owned and cancelled by the connection task.
+    Session(std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>),
     TcpForward {
         remote_location: NetLocation,
         stream: Box<dyn AsyncStream>,
@@ -64,7 +66,7 @@ impl TcpServerSetupResult {
             } => {
                 *flush = need_initial_flush;
             }
-            TcpServerSetupResult::AlreadyHandled => {}
+            TcpServerSetupResult::AlreadyHandled | TcpServerSetupResult::Session(_) => {}
         }
     }
 }

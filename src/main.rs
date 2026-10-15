@@ -14,6 +14,7 @@ mod crypto;
 mod dns;
 mod logging;
 mod option_util;
+mod prepend_stream;
 mod reality;
 mod reality_client_handler;
 mod resolver;

@@ -505,3 +505,15 @@ impl<T: ?Sized + AsyncWriteSessionMessage + Unpin> AsyncWriteSessionMessage for 
 
 impl<T: ?Sized + AsyncSessionMessageStream + Unpin> AsyncSessionMessageStream for Box<T> {}
 impl<T: ?Sized + AsyncSessionMessageStream + Unpin> AsyncSessionMessageStream for &mut T {}
+
+#[cfg(test)]
+impl AsyncPing for tokio::io::DuplexStream {
+    fn supports_ping(&self) -> bool {
+        false
+    }
+    fn poll_write_ping(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<bool>> {
+        Poll::Ready(Ok(false))
+    }
+}
+#[cfg(test)]
+impl AsyncStream for tokio::io::DuplexStream {}

@@ -16,6 +16,7 @@ pub mod crypto;
 pub mod dns;
 pub mod logging;
 pub mod option_util;
+mod prepend_stream;
 pub mod reality;
 mod reality_client_handler;
 pub mod resolver;

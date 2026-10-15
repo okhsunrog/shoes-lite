@@ -707,9 +707,19 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn test_e2e_vless_reality_large_payload() {
-        let config = e2e_config(E2E_UUID_BASIC, None);
+        e2e_large_payload(E2E_UUID_BASIC, None).await;
+    }
 
-        let mut stream = tokio::time::timeout(
+    #[tokio::test]
+    #[ignore] // Requires tests/docker/run-e2e.sh
+    async fn test_e2e_vless_reality_vision_large_payload() {
+        e2e_large_payload(E2E_UUID_VISION, Some("xtls-rprx-vision")).await;
+    }
+
+    async fn e2e_large_payload(uuid: &str, flow: Option<&str>) {
+        let config = e2e_config(uuid, flow);
+
+        let stream = tokio::time::timeout(
             Duration::from_secs(30),
             connect_through_vless(&config, E2E_ECHO_HOST, E2E_ECHO_PORT),
         )
@@ -994,7 +1004,7 @@ mod tests {
             fwmark: None,
         };
 
-        let mut stream = tokio::time::timeout(
+        let stream = tokio::time::timeout(
             Duration::from_secs(30),
             connect_through_vless(&config, E2E_ECHO_HOST, E2E_ECHO_PORT),
         )

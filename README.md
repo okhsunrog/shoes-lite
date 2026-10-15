@@ -158,3 +158,21 @@ See the [examples](./examples) directory and [CONFIG.md](./CONFIG.md) for more c
 ## License
 
 MIT
+
+## Upstream TLS and TUN fixes (October 2026)
+
+Ported the TLS/Vision ownership fixes from upstream `9b0f808` and adapted the
+TUN event-driven work from `ee38ccc` to this fork's cross-platform async stack.
+TLS records now keep one owner through handshake and Vision END/DIRECT transitions;
+REALITY and VLESS fallbacks return an owned session instead of detaching a task.
+Shutdown after EOF is bounded, while active sessions have no added lifetime limit.
+`CryptoTlsStream::handshake` replaces the separate public handshake function;
+Vision constructors accept that owned stream. Server handlers must await the new
+`TcpServerSetupResult::Session` variant. Multi-user authentication, shared bandwidth
+limits, and per-client Linux socket marks remain supported.
+
+The async TUN loop waits for packet/bridge notifications and actual TCP deadlines
+instead of a 10 ms polling fallback, uses a monotonic clock, propagates device
+failures, rejects partial packet writes, and owns child TCP tasks through shutdown.
+It retains `tun::AsyncDevice` on Linux, Windows, and Android. Unix-only raw-fd stack,
+splice/offload, and post-quantum REALITY changes are not part of this port.

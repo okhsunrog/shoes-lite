@@ -713,9 +713,10 @@ mod tests {
             Box::pin(async move {
                 if n == 0 {
                     // First build: return a resolver that times out
-                    Ok(Arc::new(MockResolver::with_error(
-                        std::io::ErrorKind::TimedOut,
-                    )) as Arc<dyn Resolver>)
+                    Ok(
+                        Arc::new(MockResolver::with_error(std::io::ErrorKind::TimedOut))
+                            as Arc<dyn Resolver>,
+                    )
                 } else {
                     // Refresh build: return a resolver that succeeds
                     Ok(Arc::new(MockResolver::with_addrs(addrs)) as Arc<dyn Resolver>)
@@ -747,9 +748,10 @@ mod tests {
             call_count_clone.fetch_add(1, Ordering::Relaxed);
             Box::pin(async move {
                 // Return a resolver that returns a non-refreshable error
-                Ok(Arc::new(MockResolver::with_error(
-                    std::io::ErrorKind::Other,
-                )) as Arc<dyn Resolver>)
+                Ok(
+                    Arc::new(MockResolver::with_error(std::io::ErrorKind::Other))
+                        as Arc<dyn Resolver>,
+                )
             })
         });
 
@@ -778,9 +780,9 @@ mod tests {
         let factory: ResolverFactory = Arc::new(move || {
             call_count_clone.fetch_add(1, Ordering::Relaxed);
             let addrs = addrs_clone.clone();
-            Box::pin(async move {
-                Ok(Arc::new(MockResolver::with_addrs(addrs)) as Arc<dyn Resolver>)
-            })
+            Box::pin(
+                async move { Ok(Arc::new(MockResolver::with_addrs(addrs)) as Arc<dyn Resolver>) },
+            )
         });
 
         let policy = RefreshPolicy {
