@@ -17,7 +17,7 @@ use crate::address::{NetLocation, ResolvedLocation};
 use crate::async_stream::AsyncStream;
 use crate::config::{ClientConfig, Transport};
 use crate::resolver::{Resolver, resolve_addresses, resolve_location};
-use crate::socket_util::{new_tcp_socket, new_udp_socket, set_tcp_keepalive};
+use crate::socket_util::{new_tcp_socket_with_mark, new_udp_socket_with_mark, set_tcp_keepalive};
 
 use super::socket_connector::SocketConnector;
 
@@ -36,6 +36,7 @@ enum TransportConfig {
 #[derive(Debug)]
 pub struct SocketConnectorImpl {
     bind_interface: Option<String>,
+    fwmark: Option<u32>,
     transport: TransportConfig,
 }
 
@@ -79,6 +80,7 @@ impl SocketConnectorImpl {
 
         Some(Self {
             bind_interface,
+            fwmark: config.fwmark,
             transport,
         })
     }
@@ -90,6 +92,7 @@ impl SocketConnectorImpl {
     pub fn new_tcp(bind_interface: Option<String>, no_delay: bool) -> Self {
         Self {
             bind_interface,
+            fwmark: None,
             transport: TransportConfig::Tcp { no_delay },
         }
     }
@@ -111,8 +114,11 @@ impl SocketConnector for SocketConnectorImpl {
             TransportConfig::Tcp { no_delay } => {
                 let mut last_err = None;
                 for (i, target_addr) in target_addrs.iter().enumerate() {
-                    let tcp_socket =
-                        new_tcp_socket(self.bind_interface.clone(), target_addr.is_ipv6())?;
+                    let tcp_socket = new_tcp_socket_with_mark(
+                        self.bind_interface.clone(),
+                        target_addr.is_ipv6(),
+                        self.fwmark,
+                    )?;
                     match tcp_socket.connect(*target_addr).await {
                         Ok(stream) => {
                             if i > 0 {
@@ -139,9 +145,8 @@ impl SocketConnector for SocketConnectorImpl {
                         }
                     }
                 }
-                Err(last_err.unwrap_or_else(|| {
-                    std::io::Error::other("no resolved addresses succeeded")
-                }))
+                Err(last_err
+                    .unwrap_or_else(|| std::io::Error::other("no resolved addresses succeeded")))
             }
         }
     }
@@ -157,7 +162,11 @@ impl SocketConnector for SocketConnectorImpl {
         );
 
         let remote_addr = resolve_location(&mut target, resolver).await?;
-        let client_socket = new_udp_socket(remote_addr.is_ipv6(), self.bind_interface.clone())?;
+        let client_socket = new_udp_socket_with_mark(
+            remote_addr.is_ipv6(),
+            self.bind_interface.clone(),
+            self.fwmark,
+        )?;
 
         // Don't use connect() - wrap in UnconnectedUdpSocket instead.
         // A connected UDP socket filters incoming packets by source address,

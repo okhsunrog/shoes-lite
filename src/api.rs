@@ -46,6 +46,8 @@ pub struct VlessConfig {
     pub mtu: Option<u16>,
     /// Allowed IPs for routing, e.g. "0.0.0.0/0".
     pub allowed_ips: Option<String>,
+    /// Linux mark on every upstream socket, including connectivity checks. Failure is fatal.
+    pub fwmark: Option<u32>,
 }
 
 impl VlessConfig {
@@ -114,6 +116,7 @@ impl VlessConfig {
             dns: None,
             mtu: None,
             allowed_ips: None,
+            fwmark: None,
         })
     }
 }
@@ -252,6 +255,7 @@ fn build_vless_selector(
 
     let client_config = ClientConfig {
         bind_interface: NoneOrOne::None,
+        fwmark: config.fwmark,
         address: server_location,
         protocol: ClientProxyConfig::Reality {
             public_key: config.reality_public_key.clone(),
@@ -570,6 +574,7 @@ mod tests {
             dns: None,
             mtu: None,
             allowed_ips: None,
+            fwmark: None,
         };
         let resolver: Arc<dyn Resolver> = Arc::new(NativeResolver::new());
         let selector = build_vless_selector(&config, resolver);
@@ -611,6 +616,7 @@ mod tests {
             dns: None,
             mtu: None,
             allowed_ips: None,
+            fwmark: None,
         }
     }
 
@@ -942,6 +948,7 @@ mod tests {
             dns: None,
             mtu: None,
             allowed_ips: None,
+            fwmark: None,
         };
 
         let mut stream = tokio::time::timeout(
@@ -984,6 +991,7 @@ mod tests {
             dns: None,
             mtu: None,
             allowed_ips: None,
+            fwmark: None,
         };
 
         let mut stream = tokio::time::timeout(

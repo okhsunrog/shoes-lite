@@ -12,6 +12,14 @@ pub fn new_udp_socket(
     is_ipv6: bool,
     bind_interface: Option<String>,
 ) -> std::io::Result<tokio::net::UdpSocket> {
+    new_udp_socket_with_mark(is_ipv6, bind_interface, None)
+}
+
+pub fn new_udp_socket_with_mark(
+    is_ipv6: bool,
+    bind_interface: Option<String>,
+    fwmark: Option<u32>,
+) -> std::io::Result<tokio::net::UdpSocket> {
     let socket = new_socket2_udp_socket(
         is_ipv6,
         bind_interface,
@@ -19,6 +27,7 @@ pub fn new_udp_socket(
         false,
     )?;
 
+    apply_fwmark(&socket, fwmark)?;
     into_tokio_udp_socket(socket)
 }
 
@@ -86,8 +95,8 @@ pub fn new_socket2_udp_socket_with_buffer_size(
 fn into_tokio_udp_socket(socket: socket2::Socket) -> std::io::Result<tokio::net::UdpSocket> {
     #[cfg(unix)]
     {
+        crate::tun::protect_socket(socket.as_raw_fd())?;
         let raw_fd = socket.into_raw_fd();
-        crate::tun::protect_socket(raw_fd)?;
         let std_udp_socket = unsafe { std::net::UdpSocket::from_raw_fd(raw_fd) };
         tokio::net::UdpSocket::from_std(std_udp_socket)
     }
@@ -102,12 +111,34 @@ pub fn new_tcp_socket(
     bind_interface: Option<String>,
     is_ipv6: bool,
 ) -> std::io::Result<tokio::net::TcpSocket> {
+    new_tcp_socket_with_mark(bind_interface, is_ipv6, None)
+}
+
+pub fn new_tcp_socket_with_mark(
+    bind_interface: Option<String>,
+    is_ipv6: bool,
+    fwmark: Option<u32>,
+) -> std::io::Result<tokio::net::TcpSocket> {
     let tcp_socket = if is_ipv6 {
         tokio::net::TcpSocket::new_v6()?
     } else {
         tokio::net::TcpSocket::new_v4()?
     };
 
+    if let Some(mark) = fwmark {
+        #[cfg(target_os = "linux")]
+        socket2::SockRef::from(&tcp_socket)
+            .set_mark(mark)
+            .map_err(mark_error)?;
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = mark;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "SO_MARK requires Linux",
+            ));
+        }
+    }
     #[cfg(unix)]
     crate::tun::protect_socket(tcp_socket.as_raw_fd())?;
 
@@ -199,4 +230,58 @@ pub fn new_unix_listener<P: AsRef<Path>>(
 
     let std_listener: std::os::unix::net::UnixListener = socket.into();
     tokio::net::UnixListener::from_std(std_listener)
+}
+
+fn apply_fwmark(socket: &Socket, mark: Option<u32>) -> std::io::Result<()> {
+    if let Some(mark) = mark {
+        #[cfg(target_os = "linux")]
+        socket.set_mark(mark).map_err(mark_error)?;
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (socket, mark);
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "SO_MARK requires Linux",
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn mark_error(e: std::io::Error) -> std::io::Error {
+    std::io::Error::new(
+        e.kind(),
+        format!("required SO_MARK failed: {e}; grant the tunnel process CAP_NET_ADMIN"),
+    )
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod mark_tests {
+    use super::*;
+    const MARK: u32 = 0x666c6f70;
+
+    fn assert_mark<S: std::os::fd::AsFd>(socket: &S) {
+        assert_eq!(socket2::SockRef::from(socket).mark().unwrap(), MARK);
+    }
+
+    #[tokio::test]
+    async fn tcp_and_udp_marks_are_required_before_connect() {
+        for ipv6 in [false, true] {
+            match new_tcp_socket_with_mark(None, ipv6, Some(MARK)) {
+                Ok(socket) => assert_mark(&socket),
+                Err(e) => {
+                    assert_eq!(e.kind(), std::io::ErrorKind::PermissionDenied);
+                    assert!(e.to_string().contains("required SO_MARK failed"));
+                }
+            }
+            match new_udp_socket_with_mark(ipv6, None, Some(MARK)) {
+                Ok(socket) => assert_mark(&socket),
+                Err(e) => {
+                    assert_eq!(e.kind(), std::io::ErrorKind::PermissionDenied);
+                    assert!(e.to_string().contains("required SO_MARK failed"));
+                }
+            }
+        }
+    }
 }

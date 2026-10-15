@@ -65,6 +65,9 @@ where
 pub struct ClientConfig {
     #[serde(default, skip_serializing_if = "NoneOrOne::is_unspecified")]
     pub bind_interface: NoneOrOne<String>,
+    /// Linux SO_MARK applied before any outbound packet; errors are never ignored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fwmark: Option<u32>,
     #[serde(
         default = "unspecified_address",
         skip_serializing_if = "NetLocation::is_unspecified"
@@ -83,6 +86,7 @@ impl Default for ClientConfig {
     fn default() -> Self {
         Self {
             bind_interface: NoneOrOne::None,
+            fwmark: None,
             address: unspecified_address(),
             protocol: ClientProxyConfig::Direct,
             transport: Transport::default(),
@@ -197,6 +201,7 @@ type: direct
     #[test]
     fn test_client_config_serialization() {
         let original = ClientConfig {
+            fwmark: Some(1234),
             bind_interface: NoneOrOne::One("eth0".to_string()),
             address: NetLocation::from_ip_addr(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)), 1080),
             protocol: ClientProxyConfig::Vless {

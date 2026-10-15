@@ -14,6 +14,7 @@ Used as a dependency by VPN clients (TUN tunnel) and servers (REALITY inbound).
 - **VLESS URI parser** — standard `vless://` format from 3X-UI / v2rayNG
 - **Traffic stats** with atomic counters (tx/rx bytes)
 - **Socket protection** bridge for Android `VpnService.protect()`
+- **Linux socket marks** per client (`VlessConfig::fwmark` / `ClientConfig::fwmark`)
 - **Standalone server binary** with YAML config and hot-reload
 
 ## Library Usage
@@ -50,6 +51,14 @@ println!("TX: {} bytes, RX: {} bytes", stats.tx_bytes, stats.rx_bytes);
 // Shut down
 tunnel.stop().await.unwrap();
 ```
+
+On Linux, set `config.fwmark = Some(mark)` before starting a tunnel when its outer
+traffic must bypass a policy routing table. The same mark is used by connectivity
+checks and every new TCP/UDP transport socket, before connecting or sending. A
+failed `SO_MARK` returns an error and closes the socket; it never retries without
+the mark. The process needs permission to set socket marks (normally
+`CAP_NET_ADMIN`). The default `None` leaves sockets unmarked; requesting a mark
+on other platforms returns `Unsupported`. Android socket protection is independent.
 
 ### Server — Multi-User VLESS Inbound
 
