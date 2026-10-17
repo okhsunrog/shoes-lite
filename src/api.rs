@@ -509,6 +509,29 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_vless_uri_ipv6_server_location() {
+        for authority in ["[2001:db8::1]", "[2001:db8::1]:8443"] {
+            let uri =
+                format!("vless://uuid@{authority}?security=reality&sni=sni.example.com&pbk=key123");
+            let config = VlessConfig::from_uri(&uri).unwrap();
+            let location = NetLocation::from_str(&config.server_addr, None).unwrap();
+            assert_eq!(
+                location.address(),
+                &crate::address::Address::Ipv6("2001:db8::1".parse().unwrap())
+            );
+            assert_eq!(
+                location.port(),
+                if authority.ends_with(":8443") {
+                    8443
+                } else {
+                    443
+                }
+            );
+            assert!(location.to_socket_addr_nonblocking().is_some());
+        }
+    }
+
+    #[test]
     fn test_parse_vless_uri_wrong_scheme() {
         let uri = "vmess://uuid@host:443?security=reality&sni=a&pbk=b";
         let err = VlessConfig::from_uri(uri).unwrap_err();
